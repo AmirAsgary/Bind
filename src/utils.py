@@ -518,7 +518,18 @@ def angle_between_vectors(a, b):
 
 
 
-def vectorized_cos_sin_between_vectors(a, b):
+def vectorized_cos_sin_between_vectors(a: np.ndarray, b: np.ndarray) -> tuple:
+    """    
+    Calculate the cosine and sine of the angle between two sets of vectors in a vectorized manner.
+    Parameters:
+    a (np.ndarray): A 2D array of shape (N, 3) representing the first set of vectors.
+    b (np.ndarray): A 2D array of shape (N, 3) representing the second set of vectors.
+    Returns:
+    tuple: A tuple containing two 1D arrays:
+        - cos (np.ndarray): The cosine of the angle between the vectors in a and b.
+        - sin (np.ndarray): The sine of the angle between the vectors in a and b.
+        # dimension of cos is (N,) and sin is (N,)
+    """
     # Normalize the vectors
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
@@ -540,14 +551,38 @@ def vectorized_cos_sin_between_vectors(a, b):
     del a_mag, b_mag
     gc.collect()
 
-    return cos, sin
+    return cos, sin #(N,) (N,)
 
-def vectorized_dihedral_sin_cosine(ca1_to_beta1, beta1_to_beta2, beta2_to_back2):
+def vectorized_dihedral_sin_cosine_beta(ca1_to_beta1, beta1_to_beta2, beta2_to_back2):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         b1 = ca1_to_beta1#(N, 3)
         b2 = beta1_to_beta2#(N, 3)
         b3 = beta2_to_back2#(N, 3)
+        # Cross products to get prependicular vectors
+        n1 = np.cross(b1, b2)#(N, 3)
+        n2 = np.cross(b2, b3)#(N, 3)
+        # normalize prependicular vectors
+        n1 /= np.linalg.norm(n1, axis=1)[:, np.newaxis] #(N, 3)
+        n2 /= np.linalg.norm(n2, axis=1)[:, np.newaxis] #(N, 3)
+        # since b2 is our central axis and needed for sin calc, we normalize it too
+        b2_unit = b2 / np.linalg.norm(b2, axis=1)[:, np.newaxis]
+        # Cosine and sine of the dihedral angles
+        cos = np.einsum('ij,ij->i', n1, n2)
+        sin = np.einsum('ij,ij->i', np.cross(n1,n2), b2_unit)
+        cos = np.nan_to_num(cos, nan=0.0)
+        sin = np.nan_to_num(sin, nan=0.0)
+    del b1, b2, b3, n1, n2, b2_unit
+    gc.collect()
+    return cos, sin
+
+
+def vectorized_dihedral_sin_cosine_alpha(caiminusorplus_to_caiself, caiself_to_cajself, cajself_to_cajminusorplus):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        b1 = caiminusorplus_to_caiself#(N, 3)
+        b2 = caiself_to_cajself#(N, 3)
+        b3 = cajself_to_cajminusorplus#(N, 3)
         # Cross products to get prependicular vectors
         n1 = np.cross(b1, b2)#(N, 3)
         n2 = np.cross(b2, b3)#(N, 3)
@@ -677,6 +712,7 @@ def retrieve_plus_minus_vectors(diff_vectors):
 
 def retrieve_plus_minus_vectors_of_nearest_neighbour(diff_vectors, nearest_neighbour_indeces):
     '''
+    Retrieves n-1 and n+1 difference vectors for each coordinate based on the nearest neighbour indices.
     Args:
         diff_vectors: np.ndarray of shape (N, N, D)
         nearest_neighbour_indeces: np.ndarray of shape (N,)
@@ -752,9 +788,9 @@ def retrieve_plus_minus_vectors_of_nearest_neighbour(diff_vectors, nearest_neigh
 
     result_minus = np.concatenate([i_minus_j_minus_diffvec, i_minus_j_self_diffvec, i_minus_j_plus_diffvec], axis=1) # (N,3,3) [i-1-->j-1, i-1-->j, i-1-->j+1]
     result_self = np.concatenate([i_self_j_minus_diffvec, i_self_j_self_diffvec, i_self_j_plus_diffvec], axis=1) # (N,3,3) [i-->j-1, i-->j, i-->j+1]
-    result_after = np.concatenate([i_plus_j_minus_diffvec, i_plus_j_self_diffvec, i_plus_j_plus_diffvec], axis=1) #(N,3,3) [i+1--j-1, i+1-->j, i+1-->j+1]
+    result_plus = np.concatenate([i_plus_j_minus_diffvec, i_plus_j_self_diffvec, i_plus_j_plus_diffvec], axis=1) #(N,3,3) [i+1--j-1, i+1-->j, i+1-->j+1]
 
-    return result_minus, result_self, result_after
+    return result_minus, result_self, result_plus
 
 
 def find_inter_residues(arr1, lengths, inter_threshold=7):
@@ -945,6 +981,47 @@ def pdb_to_df(pdb_file: str, structure, add_sasa=True, add_cx=True, pdb_id='A'):
     gc.collect()
     return df, model_chains
 
+def foldseek_sequence_distance_features(i, j):
+    """
+    Vectorized computation of Foldseek-style sequence distance features.
+    Args:
+        i: np.ndarray of shape (N,), residue indices
+        j: np.ndarray of shape (N,), nearest neighbor residue indices
+    Returns:
+        feature1: np.ndarray of shape (N,), sign(i−j) * min(|i−j|, 4)
+        feature2: np.ndarray of shape (N,), sign(i−j) * log(|i−j| + 1)
+    """
+    delta = i - j
+    sign = np.sign(delta)
+    abs_delta = np.abs(delta)
+    feature1 = sign * np.minimum(abs_delta, 4)
+    feature2 = sign * np.log(abs_delta + 1)
+    return feature1, feature2
+
+
+def compute_pairwise_cosine_angles(vectors, upper_triangle_only=True):
+    """
+    Compute cosine similarities between all K vectors for each N sample.
+    Args:
+        vectors: np.ndarray of shape (N, K, 3), directional vectors to neighbors
+        upper_triangle_only: bool, if True, return only the upper triangle (i < j)
+    Returns:
+        cos_angles: 
+            - shape (N, K, K) if upper_triangle_only=False
+            - shape (N, K*(K-1)//2) if upper_triangle_only=True
+    """
+    # Normalize vectors (avoid division by zero)
+    norms = np.linalg.norm(vectors, axis=-1, keepdims=True)  # shape (N, K, 1)
+    normalized = vectors / (norms + 1e-8)
+    # Compute cosine similarity matrix: (N, K, 3) @ (N, 3, K) → (N, K, K)
+    cos_angles = np.matmul(normalized, np.transpose(normalized, (0, 2, 1)))
+    if upper_triangle_only:
+        K = vectors.shape[1]
+        triu_idx = np.triu_indices(K, k=1) #[0] --> i_idx and [1] --> j_idx
+        cos_angles = cos_angles[:, triu_idx[0], triu_idx[1]]  # shape (N, K*(K-1)//2)
+        return cos_angles, triu_idx # (N, K*(K-1)//2), (i_idx, j_idx) for upper triangle indices
+    else:
+        return cos_angles # (N, K, K)
 
 def compute_geometrical_features(sidechain_centroid_array, backbone_centroid_array, res_labels, k_nearest=1):
 
@@ -967,13 +1044,16 @@ def compute_geometrical_features(sidechain_centroid_array, backbone_centroid_arr
     # direction is = (CBi-1 - CBi) and (CBi+1 - CBi)
     u4u6 = retrieve_plus_minus_vectors(sidechains_diff_vecs)  # (N, 2, 3) with (,0,) for ni-1 and (,1,) for ni+1
     # for each k_nearest neighbour we need to retrieve the vectors for each residue
+    vectors_i_to_all_ks_cb = []
+    vectors_i_to_all_ks_ca = []
     for k in range(k_nearest):
         nearest_neighbours_cb = nearest_neighbours_cb_all[:, k] # kth nearest neighbour (N,) indeces from cb
         nearest_distances_cb = nearest_distances_cb_all[:, k] # (N,) with distances to the nearest neighbours
         nearest_neighbours_ca = nearest_neighbours_ca_all[:, k] # from ca
-        nearest_distances_ca = nearest_distances_ca_all[:, k] 
+        nearest_distances_ca = nearest_distances_ca_all[:, k]
+    
         # defining the vectors:
-        #(u10, u11) same as u1u3 but for kth nearest neighbour --> CAj-1---CA---CAj+1  it is the neaest neighbour backbone and is called j.
+        #(u10, u11) same as u1u3 but for kth nearest neighbour --> CAj-1---CA---CAj+1, j-->j-1 or j+1  it is the neaest neighbour backbone and is called j.
         u10u11 = u1u3[nearest_neighbours_cb] # (N, 2, 3) with (,0,) for nj-1 and (,1,) for nj+1
         #u2 --> CAj--CBj , direction is CA --> CB
         u8 = u2[nearest_neighbours_cb] # (N, 2) carries differences for each nearest neighbour
@@ -982,9 +1062,33 @@ def compute_geometrical_features(sidechain_centroid_array, backbone_centroid_arr
         u7u9 = u4u6[nearest_neighbours_cb]  # (N, 2, 3) with (,0,) for nj-1 and (,1,) for nj+1
         ## u5, which is CBi----CBj
         u5 = sidechains_diff_vecs[np.arange(sidechains_diff_vecs.shape[0]), nearest_neighbours_cb] # (N, 3) dim
+
         ## define additional vectors that were added later:
         # u12,...,u19 are vectors between CBis and CBjs
+        # cb_minus: u12,u13,u14, cb_self: u15,u5 (it is correct),u16, cb_plus: u17,u18,u19
+        cb_minus, cb_self, cb_plus = retrieve_plus_minus_vectors_of_nearest_neighbour(sidechains_diff_vecs, nearest_neighbours_cb) # (N, 3, 3) with i-1, i and i+1 for each nearest neighbour at [:,0,:], [:,1,:] and [:,2,:] respectively
+        u12_dist = np.linalg.norm(cb_minus[:, 0, :], axis=1) # (N,) distances for u12
+        u13_dist = np.linalg.norm(cb_minus[:, 1, :], axis=1) # (N,) distances for u13
+        u14_dist = np.linalg.norm(cb_minus[:, 2, :], axis=1) # (N,) distances for u14
+        u15_dist = np.linalg.norm(cb_self[:, 0, :], axis=1) # (N,) distances for u15
+        #u5 = np.linalg.norm(cb_self[:, 1, :], axis=1) Not ncecessary bcz u5_dist == nearest_distances_cb u5_dist
+        u16_dist = np.linalg.norm(cb_self[:, 2, :], axis=1) # (N,) distances for u16
+        u17_dist = np.linalg.norm(cb_plus[:, 0, :], axis=1) # (N,) distances for u17
+        u18_dist = np.linalg.norm(cb_plus[:, 1, :], axis=1) # (N,) distances for u18
+        u19_dist = np.linalg.norm(cb_plus[:, 2, :], axis=1) # (N,) distances for u19
 
+        # u20,...,u27 are vectors between CAis and CAjs
+        # ca_minus: u20,u21,u22, ca_self: u23,u24,u25, ca_plus: u26,u27,u28
+        ca_minus, ca_self, ca_plus = retrieve_plus_minus_vectors_of_nearest_neighbour(backbone_diff_vecs, nearest_neighbours_ca) # (N, 3, 3) with i-1, i and i+1 for each nearest neighbour at [:,0,:], [:,1,:] and [:,2,:] respectively
+        u20_dist = np.linalg.norm(ca_minus[:, 0, :], axis=1) # (N,) distances for u20
+        u21_dist = np.linalg.norm(ca_minus[:, 1, :], axis=1) # (N,) distances for u21
+        u22_dist = np.linalg.norm(ca_minus[:, 2, :], axis=1) # (N,) distances for u22
+        u23_dist = np.linalg.norm(ca_self[:, 0, :], axis=1) # (N,) distances for u23
+        #u24_dist = np.linalg.norm(ca_self[:, 1, :], axis=1) # (N,) distances for u24 same as nearest_distance_ca
+        u25_dist = np.linalg.norm(ca_self[:, 2, :], axis=1) # (N,) distances for u25
+        u26_dist = np.linalg.norm(ca_plus[:, 0, :], axis=1) # (N,) distances for u26
+        u27_dist = np.linalg.norm(ca_plus[:, 1, :], axis=1) # (N,) distances for u27
+        u28_dist = np.linalg.norm(ca_plus[:, 2, :], axis=1) # (N,) distances for u28
         #### COMPUTE ANGLE COSINES
         t12 = vectorized_cos_sin_between_vectors(u1u3[:, 0, :], u2)
         t23 = vectorized_cos_sin_between_vectors(u2, u1u3[:, 1, :])
@@ -1005,15 +1109,63 @@ def compute_geometrical_features(sidechain_centroid_array, backbone_centroid_arr
         t69 = vectorized_cos_sin_between_vectors(u4u6[:, 1, :], u7u9[:, 1, :])
         t25 = vectorized_cos_sin_between_vectors(u2, u5)
         t85 = vectorized_cos_sin_between_vectors(u8, u5)
-        dihedral_cos, dihedral_sin = vectorized_dihedral_sin_cosine(ca1_to_beta1=u2, beta1_to_beta2=-u5, beta2_to_back2=-u8)
-    
+        # tuple (cos, sin), each is (N,)
+        dihedral_cossin_selfai_selfbi_selfbj_selfaj = vectorized_dihedral_sin_cosine_beta(ca1_to_beta1=u2, beta1_to_beta2=-u5, beta2_to_back2=-u8) #cai-->cbi-->cbj-->caj
+        dihedral_cossin_minusi_selfi_selfj_minusj = vectorized_dihedral_sin_cosine_alpha(
+                                                                                        caiminusorplus_to_caiself=-u1u3[:, 0, :], # cai-1-->cai (-u2)
+                                                                                        caiself_to_cajself=-ca_self[:, 1, :], # cai-->caj (-u24)
+                                                                                        cajself_to_cajminusorplus=u10u11[:, 0, :] # caj-->caj-1 (u10)
+                                                                                        ) #(tuple: (cos, sin), each is (N,))
+        dihedral_cossin_minusi_selfi_selfj_plusj = vectorized_dihedral_sin_cosine_alpha(
+                                                                                        caiminusorplus_to_caiself=-u1u3[:, 0, :], # cai-1-->cai (-u2)
+                                                                                        caiself_to_cajself=-ca_self[:, 1, :], # cai-->caj (-u24)
+                                                                                        cajself_to_cajminusorplus=u10u11[:, 1, :] # caj-->caj+1 (u11)
+                                                                                         ) #(tuple: (cos, sin), each is (N,))
+        dihedral_cossin_plusi_selfi_selfj_minusj = vectorized_dihedral_sin_cosine_alpha(
+                                                                                        caiminusorplus_to_caiself=-u1u3[:, 1, :], # cai+1-->cai (-u3)
+                                                                                        caiself_to_cajself=-ca_self[:, 1, :], # cai-->caj (u24)
+                                                                                        cajself_to_cajminusorplus=u10u11[:, 0, :] # caj-->caj-1 (u10)
+                                                                                        ) #(tuple: (cos, sin), each is (N,))
+        dihedral_cossin_plusi_selfi_selfj_plusj = vectorized_dihedral_sin_cosine_alpha(
+                                                                                        caiminusorplus_to_caiself=-u1u3[:, 1, :], # cai+1-->cai (-u3)
+                                                                                        caiself_to_cajself=-ca_self[:, 1, :], # cai-->caj (u24)
+                                                                                        cajself_to_cajminusorplus=u10u11[:, 1, :] # caj-->caj+1 (u11)
+                                                                                        ) #(tuple: (cos, sin), each is (N,))
 
+        ### Positional Encoding (Foldseek-style)
+        linear_foldseek_b, log_foldseek_b = foldseek_sequence_distance_features(i=np.arange(sidechain_centroid_array.shape[0]),
+                                                             j=nearest_neighbours_cb,) #(N,), inputs--> (N,), (N,). calculates foldseek positional encoding features
+        linear_foldseek_a, log_foldseek_a = foldseek_sequence_distance_features(i=np.arange(sidechain_centroid_array.shape[0]),
+                                                            j=nearest_neighbours_ca,) #(N,), inputs--> (N,), (N,). calculates foldseek positional encoding features
+    
+        ### append cai-->caj and cbi-->cbj vectors
+        vectors_i_to_all_ks_cb.append(-u5) #(N, 3) vectors from CBi to CBj
+        vectors_i_to_all_ks_ca.append(-ca_self[:, 1, :]) # (N, 3) vectors from CAi to CAj
         # reverese_mapping
         unique_labels, inverse_indeces = np.unique(res_labels, return_inverse=True)
         # final dict
         final_dict = {
+            f'u12_dist_{k}': u12_dist[inverse_indeces], 
+            f'u13_dist_{k}': u13_dist[inverse_indeces],
+            f'u14_dist_{k}': u14_dist[inverse_indeces],
+            f'u15_dist_{k}': u15_dist[inverse_indeces],
+            f'u16_dist_{k}': u16_dist[inverse_indeces],
+            f'u17_dist_{k}': u17_dist[inverse_indeces],
+            f'u18_dist_{k}': u18_dist[inverse_indeces],
+            f'u19_dist_{k}': u19_dist[inverse_indeces],
             f'nearest_neighbours_cb_{k}': nearest_neighbours_cb[inverse_indeces],
             f'nearest_distances_cb_{k}': nearest_distances_cb[inverse_indeces],
+            f'u20_dist_{k}': u20_dist[inverse_indeces],
+            f'u21_dist_{k}': u21_dist[inverse_indeces],
+            f'u22_dist_{k}': u22_dist[inverse_indeces],
+            f'u23_dist_{k}': u23_dist[inverse_indeces],
+            #f'u24_dist_{k}': u24_dist[inverse_indeces], #same as nearest_distances_ca
+            f'u25_dist_{k}': u25_dist[inverse_indeces],
+            f'u26_dist_{k}': u26_dist[inverse_indeces],
+            f'u27_dist_{k}': u27_dist[inverse_indeces],
+            f'u28_dist_{k}': u28_dist[inverse_indeces],
+            f'nearest_neighbours_ca_{k}': nearest_neighbours_ca[inverse_indeces],
+            f'nearest_distances_ca_{k}': nearest_distances_ca[inverse_indeces],
             f"t12_cos_{k}": t12[0][inverse_indeces], 
             f"t23_cos_{k}": t23[0][inverse_indeces], 
             f"t45_cos_{k}": t45[0][inverse_indeces], 
@@ -1032,18 +1184,44 @@ def compute_geometrical_features(sidechain_centroid_array, backbone_centroid_arr
             f't42_cos_{k}': t42[0][inverse_indeces], 
             f't62_cos_{k}': t62[0][inverse_indeces], 
             f't25_cos_{k}': t25[0][inverse_indeces],
-            f't85_cos_{k}': t85[0][inverse_indeces], 
-            f'dihedral_cos_{k}': dihedral_cos[inverse_indeces],
-            f'dihedral_sin_{k}': dihedral_sin[inverse_indeces]
+            f't85_cos_{k}': t85[0][inverse_indeces],
+            f'dihedral_cos_selfai_selfbi_selfbj_selfaj_{k}': dihedral_cossin_selfai_selfbi_selfbj_selfaj[0][inverse_indeces],
+            f'dihedral_sin_selfai_selfbi_selfbj_selfaj_{k}': dihedral_cossin_selfai_selfbi_selfbj_selfaj[1][inverse_indeces],
+            f'dihedral_cos_minusi_selfi_selfj_minusj_{k}': dihedral_cossin_minusi_selfi_selfj_minusj[0][inverse_indeces],
+            f'dihedral_sin_minusi_selfi_selfj_minusj_{k}': dihedral_cossin_minusi_selfi_selfj_minusj[1][inverse_indeces],
+            f'dihedral_cos_minusi_selfi_selfj_plusj_{k}': dihedral_cossin_minusi_selfi_selfj_plusj[0][inverse_indeces],
+            f'dihedral_sin_minusi_selfi_selfj_plusj_{k}': dihedral_cossin_minusi_selfi_selfj_plusj[1][inverse_indeces],
+            f'dihedral_cos_plusi_selfi_selfj_minusj_{k}': dihedral_cossin_plusi_selfi_selfj_minusj[0][inverse_indeces],
+            f'dihedral_sin_plusi_selfi_selfj_minusj_{k}': dihedral_cossin_plusi_selfi_selfj_minusj[1][inverse_indeces],
+            f'dihedral_cos_plusi_selfi_selfj_plusj_{k}': dihedral_cossin_plusi_selfi_selfj_plusj[0][inverse_indeces],
+            f'dihedral_sin_plusi_selfi_selfj_plusj_{k}': dihedral_cossin_plusi_selfi_selfj_plusj[1][inverse_indeces],
+            f'linear_foldseek_b_{k}': linear_foldseek_b[inverse_indeces],
+            f'log_foldseek_b_{k}': log_foldseek_b[inverse_indeces],
+            f'linear_foldseek_a_{k}': linear_foldseek_a[inverse_indeces],
+            f'log_foldseek_a_{k}': log_foldseek_a[inverse_indeces],
         }
 
-        del t12, t23, t45, t56, t78, t89, t75, t95, t42, t62, t108, t811, t110, t311, t28, t47, t69, t25, t85, dihedral_cos, dihedral_sin
+        del t12, t23, t45, t56, t78, t89, t75, t95, t42, t62, t108, t811, t110, t311, t28, t47, t69, t25, t85
         gc.collect()
+    
+    # calculate cosine angles between k nearest neighbours. like this: CAi-->CAk_0 and CAi-->CAk_1 ... and also for CB
+    vectors_i_to_all_ks_ca = np.array(vectors_i_to_all_ks_ca) # (N, k_nearest, 3)
+    vectors_i_to_all_ks_cb = np.array(vectors_i_to_all_ks_cb) # (N, k_nearest, 3)
+    cos_angles_ca, triu_idx_ca = compute_pairwise_cosine_angles(vectors_i_to_all_ks_ca, upper_triangle_only=True) # (N, k_nearest*(k_nearest-1)/2), (i_idx, j_idx) for upper triangle indices
+    cos_angles_cb, triu_idx_cb = compute_pairwise_cosine_angles(vectors_i_to_all_ks_cb, upper_triangle_only=True) # (N, k_nearest*(k_nearest-1)/2), (i_idx, j_idx) for upper triangle indices
+    # add to final_dict
+    assert len(triu_idx_ca[1]) == k_nearest*(k_nearest-1)//2, (f"Mismatch in number of cosine angles and indices," 
+                                                               f"{len(triu_idx_ca[1])} vs {k_nearest*(k_nearest-1)//2}")
+    for n in range(triu_idx_ca[1]):  # over pairwise cosine values
+        i_ca, i_cb = triu_idx_ca[0][n], triu_idx_cb[0][n]
+        j_ca, j_cb = triu_idx_ca[1][n], triu_idx_cb[1][n]
+        final_dict[f'cos_ca_k{i_ca}_and_k{j_ca}'] = cos_angles_ca[:, n]  # shape: (N,)
+        final_dict[f'cos_cb_k{i_cb}_and_k{j_cb}'] = cos_angles_cb[:, n]  # shape: (N,)
     return final_dict
 
 
 
-def add_gmf_to_df(df, model_chains):
+def add_gmf_to_df(df, model_chains, k_nearest=1):
     '''
     adds geometrical features to the dataframe retrieved from pdb
     :param df: dataframe
@@ -1060,7 +1238,8 @@ def add_gmf_to_df(df, model_chains):
         print('################SIDE',sidechain_centroid_array.shape)
         dict = compute_geometrical_features(sidechain_centroid_array,
                                             backbone_centroid_array,
-                                            res_labels)
+                                            res_labels,
+                                            k_nearest=k_nearest)
         out_df = pd.DataFrame(dict)
         DICTS.append(out_df)
     DICTS = pd.concat(DICTS).reset_index(drop=True)
@@ -1081,7 +1260,7 @@ def get_interactions_from_df(df, model_chains):
     return interacting_pairs, non_interacting_pairs
 
 
-def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../database'):
+def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../database', k_nearest=1):
     id_name = input_file.split('/')[-1].replace('.dill', '').replace('.pdb', '')
     print(f'#### 1- Extract for id {id_name}')
     os.makedirs(saving_dir, exist_ok=True)
@@ -1105,7 +1284,7 @@ def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../databas
 
 
     print(f'#### 5- hsaacs done {id_name}')
-    df = add_gmf_to_df(df, model_chains)
+    df = add_gmf_to_df(df, model_chains, k_nearest=k_nearest) # adds geometrical features to df
     interacting_pairs, non_interacting_pairs = get_interactions_from_df(df, model_chains)
     print(f'#### 6- interacting_pairs done {id_name}')
     data = {'id_name':id_name, 'pdb_file':pdb_file, 'df':df, 'hsaacs':hsaacs,
