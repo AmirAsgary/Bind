@@ -15,12 +15,14 @@ from scipy.stats import spearmanr
 from Bio.PDB.Polypeptide import is_aa
 from Bio.PDB.vectors import Vector
 from scipy.spatial import distance, distance_matrix
-from constants import AMINO_ACIDS, AMINO_ACID_IDX, three_to_one, standard_amino_acids, pdb_atom_types, one_hot_encoding, one_hot_encoding_scalar
+from src.constants import AMINO_ACIDS, AMINO_ACID_IDX, three_to_one, standard_amino_acids, pdb_atom_types, one_hot_encoding, one_hot_encoding_scalar
 from Bio.PDB.StructureBuilder import StructureBuilder
-
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Tuple, Union
 import warnings
 import gc
 import psutil
+import tensorflow as tf
 def log_memory_usage():
     process = psutil.Process(os.getpid())
     print(f"Memory usage: {process.memory_info().rss / 1024 ** 2} MB")
@@ -329,7 +331,6 @@ def get_similarity_matrix(coords, sg=2.0, thr=1e-3):
                     I[j].append(i)
                     V[j].append(s)
     similarity_matrix = (I, V)
-    
     del coords, sg, thr, i, j, d, s, I, V
     gc.collect()
     #coordinate_numbers = np.array([len(a) for a in similarity_matrix[0]])
@@ -395,10 +396,9 @@ def get_hsaac(residues, similarity_matrix):
 
 def get_hsaac_for_pdb_residues(structure, total_residues):
     #total_residues = sum(len(list(chain.get_residues())) for model in structure for chain in model)
-    output = np.zeros((total_residues, 2 * len(AMINO_ACIDS)))
+    out_hsaac = np.zeros((total_residues, 2 * len(AMINO_ACIDS)))
     out_un = np.zeros(total_residues)
     out_dn = np.zeros(total_residues)
-    
     index = 0
     for model in structure:
         for chain in model:
@@ -408,38 +408,15 @@ def get_hsaac_for_pdb_residues(structure, total_residues):
             similarity_matrix = get_similarity_matrix(coords)
             UC, DC, UN, DN = get_hsaac(residues, similarity_matrix)
             hsaacs = np.concatenate((UC, DC), axis=0).T # Transpose to get N x (2 * Na) matrix
-            
-            output[index:index+n_residues] = hsaacs
+            out_hsaac[index:index+n_residues] = hsaacs
             out_un[index:index+n_residues] = UN
             out_dn[index:index+n_residues] = DN
-            
             index += n_residues
-            
             del residues, coords, similarity_matrix, UC, DC, UN, DN, hsaacs
             gc.collect()
-    
-    return output, out_un, out_dn
+    return out_hsaac, out_un, out_dn
 
 
-'''
-def get_hsaac_for_pdb_residues(structure):
-    output = []
-    out_un = []
-    out_dn = []
-    for model in structure:
-        for chain in model:
-            residues = [residue for residue in chain.get_residues()]
-            coords = [[atom.get_coord() for atom in residue.get_atoms()] for residue in residues]
-            similarity_matrix = get_similarity_matrix(coords)
-            UC, DC, UN, DN = get_hsaac(residues, similarity_matrix)
-            hsaacs = np.concatenate((UC, DC), axis=0).T  # Transpose to get N x (2 * Na) matrix
-            output.append(hsaacs)
-            out_un.append(UN)
-            out_dn.append(DN)
-            del residues, coords, similarity_matrix, UC, DC, UN, DN, hsaacs
-            gc.collect()
-    return np.concatenate(output), np.concatenate(out_un), np.concatenate(out_dn)
-'''
 
 def Protrusion_index(array, res_labels=0, V_atom=20.1, radius=10):
     '''
@@ -511,11 +488,8 @@ def angle_between_vectors(a, b):
     dot_prod = np.dot(a, b)
     a_mag = np.linalg.norm(a)
     b_mag = np.linalg.norm(b)
-    cos = dot_prod / (a_mag * b_mag)
+    cos = dot_prod / ((a_mag * b_mag) + 1e-9)  # Adding a small value to avoid division by zero
     return cos
-
-
-
 
 
 def vectorized_cos_sin_between_vectors(a: np.ndarray, b: np.ndarray) -> tuple:
@@ -923,7 +897,6 @@ def df_to_pdb(df, default_cols=True, cols=None, filename='tmp.pdb'):
 
 
 
-
 def pdb_to_df(pdb_file: str, structure, add_sasa=True, add_cx=True, pdb_id='A'):
     # Parse PDB
     os.makedirs('tmp', exist_ok=True)
@@ -957,7 +930,8 @@ def pdb_to_df(pdb_file: str, structure, add_sasa=True, add_cx=True, pdb_id='A'):
                                  'sidechain_pseudopos_z': sidechain_pseudopos[2],
                                  'backbone_pseudopos_x':backbone_pseudopos[0],
                                  'backbone_pseudopos_y':backbone_pseudopos[1],
-                                 'backbone_pseudopos_z':backbone_pseudopos[2]}
+                                 'backbone_pseudopos_z':backbone_pseudopos[2],
+                                 'bfactor': atom.bfactor}
                     if add_sasa:
                         atom_info.update({'sasa': sasa[chain.get_id()].atomArea(a - 1) / 75}) # approximate maximum value
                         atom_info.update({'rd_value': min_dist(atom.coord, surface[chain.get_id()]) / 7.5}) # approximate maximum value
@@ -1046,6 +1020,7 @@ def compute_geometrical_features(sidechain_centroid_array, backbone_centroid_arr
     # for each k_nearest neighbour we need to retrieve the vectors for each residue
     vectors_i_to_all_ks_cb = []
     vectors_i_to_all_ks_ca = []
+    final_dict = {}
     for k in range(k_nearest):
         nearest_neighbours_cb = nearest_neighbours_cb_all[:, k] # kth nearest neighbour (N,) indeces from cb
         nearest_distances_cb = nearest_distances_cb_all[:, k] # (N,) with distances to the nearest neighbours
@@ -1139,12 +1114,12 @@ def compute_geometrical_features(sidechain_centroid_array, backbone_centroid_arr
                                                             j=nearest_neighbours_ca,) #(N,), inputs--> (N,), (N,). calculates foldseek positional encoding features
     
         ### append cai-->caj and cbi-->cbj vectors
-        vectors_i_to_all_ks_cb.append(-u5) #(N, 3) vectors from CBi to CBj
-        vectors_i_to_all_ks_ca.append(-ca_self[:, 1, :]) # (N, 3) vectors from CAi to CAj
+        vectors_i_to_all_ks_cb.append(-u5[:, np.newaxis, :]) #(N, 1, 3) vectors from CBi to CBj
+        vectors_i_to_all_ks_ca.append(-ca_self[:, 1, :][:, np.newaxis, :]) # (N, 1, 3) vectors from CAi to CAj
         # reverese_mapping
         unique_labels, inverse_indeces = np.unique(res_labels, return_inverse=True)
         # final dict
-        final_dict = {
+        final_dict.update({
             f'u12_dist_{k}': u12_dist[inverse_indeces], 
             f'u13_dist_{k}': u13_dist[inverse_indeces],
             f'u14_dist_{k}': u14_dist[inverse_indeces],
@@ -1199,24 +1174,24 @@ def compute_geometrical_features(sidechain_centroid_array, backbone_centroid_arr
             f'log_foldseek_b_{k}': log_foldseek_b[inverse_indeces],
             f'linear_foldseek_a_{k}': linear_foldseek_a[inverse_indeces],
             f'log_foldseek_a_{k}': log_foldseek_a[inverse_indeces],
-        }
+        })
 
         del t12, t23, t45, t56, t78, t89, t75, t95, t42, t62, t108, t811, t110, t311, t28, t47, t69, t25, t85
         gc.collect()
     
     # calculate cosine angles between k nearest neighbours. like this: CAi-->CAk_0 and CAi-->CAk_1 ... and also for CB
-    vectors_i_to_all_ks_ca = np.array(vectors_i_to_all_ks_ca) # (N, k_nearest, 3)
-    vectors_i_to_all_ks_cb = np.array(vectors_i_to_all_ks_cb) # (N, k_nearest, 3)
+    vectors_i_to_all_ks_ca = np.concatenate(vectors_i_to_all_ks_ca, axis=1) # (N, k_nearest, 3)
+    vectors_i_to_all_ks_cb = np.concatenate(vectors_i_to_all_ks_cb, axis=1) # (N, k_nearest, 3)
     cos_angles_ca, triu_idx_ca = compute_pairwise_cosine_angles(vectors_i_to_all_ks_ca, upper_triangle_only=True) # (N, k_nearest*(k_nearest-1)/2), (i_idx, j_idx) for upper triangle indices
     cos_angles_cb, triu_idx_cb = compute_pairwise_cosine_angles(vectors_i_to_all_ks_cb, upper_triangle_only=True) # (N, k_nearest*(k_nearest-1)/2), (i_idx, j_idx) for upper triangle indices
     # add to final_dict
     assert len(triu_idx_ca[1]) == k_nearest*(k_nearest-1)//2, (f"Mismatch in number of cosine angles and indices," 
                                                                f"{len(triu_idx_ca[1])} vs {k_nearest*(k_nearest-1)//2}")
-    for n in range(triu_idx_ca[1]):  # over pairwise cosine values
+    for n in range(len(triu_idx_ca[1])):  # over pairwise cosine values
         i_ca, i_cb = triu_idx_ca[0][n], triu_idx_cb[0][n]
         j_ca, j_cb = triu_idx_ca[1][n], triu_idx_cb[1][n]
-        final_dict[f'cos_ca_k{i_ca}_and_k{j_ca}'] = cos_angles_ca[:, n]  # shape: (N,)
-        final_dict[f'cos_cb_k{i_cb}_and_k{j_cb}'] = cos_angles_cb[:, n]  # shape: (N,)
+        final_dict[f'cos_ca_k{i_ca}_and_k{j_ca}'] = cos_angles_ca[:, n][inverse_indeces]  # shape: (N,)
+        final_dict[f'cos_cb_k{i_cb}_and_k{j_cb}'] = cos_angles_cb[:, n][inverse_indeces]  # shape: (N,)
     return final_dict
 
 
@@ -1240,7 +1215,12 @@ def add_gmf_to_df(df, model_chains, k_nearest=1):
                                             backbone_centroid_array,
                                             res_labels,
                                             k_nearest=k_nearest)
-        out_df = pd.DataFrame(dict)
+        try: 
+            out_df = pd.DataFrame(dict)
+        except:
+            for key, value in dict.items():
+                print(f"Key: {key}, Value: {len(value)}, Type: {type(value)}")
+            raise ValueError("Error in creating DataFrame from computed geometrical features.")
         DICTS.append(out_df)
     DICTS = pd.concat(DICTS).reset_index(drop=True)
     DICTS = pd.concat([df, DICTS], axis=1)
@@ -1260,38 +1240,186 @@ def get_interactions_from_df(df, model_chains):
     return interacting_pairs, non_interacting_pairs
 
 
-def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../database', k_nearest=1):
+class TFRecordManager:
+    def __init__(self, tfrecord_path: Union[str, List[str]], feature_dim: int, batch_size: int = 32, shuffle_buffer_size: int = 1000, ):
+        """
+        Initializes the TFRecordManager with the path to the TFRecord file and the feature dimension.
+        Args:
+            tfrecord_path (str or List[str]): Path to the TFRecord file(s). If a list, multiple files will be used.
+            feature_dim (int): Dimension of the features to be written to the TFRecord.
+            batch_size (int): Batch size for reading the TFRecord.
+            shuffle_buffer_size (int): Buffer size for shuffling the dataset.
+        """
+        self.tfrecord_path = tfrecord_path
+        self.feature_dim = feature_dim
+        self.batch_size = batch_size
+        self.shuffle_buffer_size = shuffle_buffer_size
+
+    @staticmethod
+    def _serialize_example(feature: np.ndarray, label: np.ndarray, ID_arr: np.ndarray) -> bytes:
+        """Serialize one sample to tf.train.Example."""
+        data = {
+            'ids': tf.train.Feature(bytes_list=tf.train.BytesList(value=[s.encode('utf-8') for s in ID_arr.flatten()])),
+            'labels': tf.train.Feature(float_list=tf.train.FloatList(value=label.flatten().tolist())),
+            'features': tf.train.Feature(float_list=tf.train.FloatList(value=feature.tolist())),
+        }
+        return tf.train.Example(features=tf.train.Features(feature=data)).SerializeToString()
+
+    def write_samples(self, features: np.ndarray, labels: np.ndarray, ID_arrs: np.ndarray) -> None: # all 2D arrays (N, d) and (N, 1) and (N, 1)
+        
+        assert tf.shape(features)[0] == tf.shape(labels)[0] == tf.shape(ID_arrs)[0], \
+            f"Shapes mismatch: features {features.shape}, labels {labels.shape}, IDs {ID_arrs.shape}"
+        assert len(features.shape) == 2 and len(labels.shape) == 2 and len(ID_arrs.shape) == 2, \
+            f"Expected 2D arrays, got features {features.shape}, labels {labels.shape}, IDs {ID_arrs.shape}"
+        assert features.shape[1] == self.feature_dim, f'Feature dimension mismatch: expected {self.feature_dim}, got {features.shape[1]}'
+        assert labels.shape[1] == 1, f'Labels should be 1D, got {labels.shape}'
+        assert ID_arrs.shape[1] == 1, f'IDs should be 1D, got {ID_arrs.shape}'
+        assert isinstance(self.tfrecord_path, str), f'When writing samples, tfrecord_path must be a string, got {type(self.tfrecord_path)}, list only is for reading'
+        N = features.shape[0]
+        with tf.io.TFRecordWriter(self.tfrecord_path) as writer:
+            for i in range(N):
+                print(features[i].shape, labels[i].shape, ID_arrs[i].shape)
+                writer.write(self._serialize_example(features[i], labels[i], ID_arrs[i]))
+
+    def _parse_example(self, example_proto: tf.Tensor) -> tuple:
+        """Parse a single Example into (features, labels, ids)."""
+        desc = {
+            'ids': tf.io.VarLenFeature(tf.string),
+            'labels': tf.io.FixedLenFeature([1], tf.float32),
+            'features': tf.io.FixedLenFeature([self.feature_dim], tf.float32),
+        }
+        parsed = tf.io.parse_single_example(example_proto, desc)
+        ids = tf.sparse.to_dense(parsed['ids'])
+        labels = parsed['labels']
+        features = parsed['features']
+        return features, labels, ids
+    
+    @staticmethod
+    @tf.autograph.experimental.do_not_convert
+    def parse_file(f):
+        return tf.data.TFRecordDataset(f)
+
+    def read_dataset(self, num_parallel_reads: int = tf.data.AUTOTUNE) -> tf.data.Dataset:
+        """
+        Build a tf.data.Dataset that:
+            - Supports single or multiple TFRecord files
+            - Shuffles files & records
+            - Reads files in parallel
+            - Batches & prefetches
+        Returns:
+            A tf.data.Dataset yielding (features, labels, ids).
+        """
+        paths = [self.tfrecord_path] if isinstance(self.tfrecord_path, str) else self.tfrecord_path
+        files_ds = tf.data.Dataset.list_files(paths, shuffle=True)
+        ds = files_ds.interleave(self.parse_file,
+                                    cycle_length=num_parallel_reads,
+                                    num_parallel_calls=tf.data.AUTOTUNE)
+        ds = ds.shuffle(self.shuffle_buffer_size)
+        ds = ds.map(self._parse_example, num_parallel_calls=tf.data.AUTOTUNE)
+        ds = ds.batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
+        return ds
+
+    def get_distributed_dataset(self, strategy: tf.distribute.Strategy) -> tf.data.Dataset:
+        """
+        Wrap the dataset with a tf.distribute.Strategy for multi-worker or multi-GPU training.
+        """
+        ds = self.read_dataset()
+        return strategy.experimental_distribute_dataset(ds)
+
+
+
+
+def extract_data_for_tfrecord(df: pd.DataFrame, pdb_id: str):
+    '''
+    Extracts data from the DataFrame for TFRecord format.
+    Args:
+        df (pd.DataFrame): DataFrame containing the data.
+        pdb_id (str): PDB ID to be used for generating IDs.
+    Returns:
+        geo_arr (np.ndarray): Array containing the geometric and physiochemical features.
+        labels_arr (np.ndarray): Array containing the labels (resname one-hot encoded).
+        IDs (np.ndarray): Array containing the IDs for each residue.
+        columns (list): List of column names for the features.'''
+    # physiochem
+    physiochem_arr = []
+    for atom in ['N', 'CA', 'C', 'O']:
+        dfsub = df[df['atom_name']==atom]
+        arrsubset = dfsub[['sasa', 'cx', 'rd_value']].to_numpy() #(N, 3)
+        physiochem_arr.append(arrsubset)
+    physiochem_arr = np.concatenate(physiochem_arr, axis=-1) #(N, 12) float
+    # labels (resname ohe scalar)
+    labels_arr = np.array([[one_hot_encoding_scalar[key]] for key in dfsub.resname.tolist()]) #(N,1) float
+    # plddt
+    plddt_arr = dfsub.bfactor.to_numpy()[:, np.newaxis] #(N,1)
+    # geometric
+    geo_arr = dfsub.iloc[:, 25:].to_numpy() #(N, d) float
+    columns = ['sasa_N', 'cx_N', 'rd_value_N',
+               'sasa_CA', 'cx_CA', 'rd_value_CA',
+               'sasa_C', 'cx_C', 'rd_value_C',
+               'sasa_O', 'cx_O', 'rd_value_O', 'bfactor'] + list(dfsub.columns[25:])
+    # concatenate all
+    all_arr = np.concatenate([physiochem_arr,  plddt_arr, geo_arr], axis=-1) #(N, 12 + 1  + d)
+    # generate IDs
+    IDs = np.array([f"{pdb_id}_{i}" for i in range(len(dfsub))])[:, np.newaxis]  #(N, 1)
+    return all_arr, labels_arr, IDs, columns
+        
+
+
+def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../database', k_nearest=1, inteacting_residues=False,
+                              un_dn=False, outtype='dill', save_file=False):
+    assert outtype in ['dill', 'tfrecord'], f"save_type must be 'dill' or 'tfrecord', got {save_type}"
     id_name = input_file.split('/')[-1].replace('.dill', '').replace('.pdb', '')
     print(f'#### 1- Extract for id {id_name}')
     os.makedirs(saving_dir, exist_ok=True)
+
     if from_dill:
         print(f'Dill State {id_name}')
         data = read_dill_and_get_dfs(input_file) # reads and cocats dfs from dill file
         pdb_file = saving_dir + '/' + id_name + '.pdb'
         df_to_pdb(data, default_cols=True, cols=None, filename=pdb_file) # saves pdb from dfs
         print(f'#### 2- DF to PDB done {pdb_file}')
+
     else:
         print(f'PDB State {id_name}')
         pdb_file = input_file
     structure = clean_and_renumber_pdb(pdb_file, pdb_file) # cleans and saves the structure
     print(f'#### 3- Structure cleaned and renumbered {id_name}')
+
     df, model_chains = pdb_to_df(pdb_file, structure, add_sasa=True, add_cx=True, pdb_id=id_name)
     print(f'#### 4- pdb to df done {id_name}')
-    unique_labels, inverse_indeces = np.unique(np.array(df.residue.tolist()), return_inverse=True)
-    hsaacs, UN, DN = get_hsaac_for_pdb_residues(structure, len(unique_labels))
-    hsaacs , UN, DN = hsaacs[inverse_indeces], UN[inverse_indeces], DN[inverse_indeces]
-    df['UN'], df['DN'] = UN, DN
 
+    if un_dn:
+        unique_labels, inverse_indeces = np.unique(np.array(df.residue.tolist()), return_inverse=True)
+        hsaacs, UN, DN = get_hsaac_for_pdb_residues(structure, len(unique_labels))
+        hsaacs , UN, DN = hsaacs[inverse_indeces], UN[inverse_indeces], DN[inverse_indeces]
+        df['UN'], df['DN'] = UN, DN
+        print(f'#### 5- hsaacs done {id_name}')
 
-    print(f'#### 5- hsaacs done {id_name}')
     df = add_gmf_to_df(df, model_chains, k_nearest=k_nearest) # adds geometrical features to df
-    interacting_pairs, non_interacting_pairs = get_interactions_from_df(df, model_chains)
+
+
     print(f'#### 6- interacting_pairs done {id_name}')
-    data = {'id_name':id_name, 'pdb_file':pdb_file, 'df':df, 'hsaacs':hsaacs,
-            'interacting_pairs':interacting_pairs, 'non_interacting_pairs':non_interacting_pairs}
-    with open(saving_dir + '/' + id_name + '.dill', 'wb') as f:
-        dill.dump(data, f)
-    print(f'#### 7- data saved {id_name}', saving_dir + '/' + id_name + '.dill')
+    if outtype == 'dill':
+        data = {
+            'id_name':id_name, 'pdb_file':pdb_file, 'df':df, #'hsaacs':hsaacs,
+                }
+        if inteacting_residues:
+            print(f'### Interacting residues {id_name}')
+            interacting_pairs, non_interacting_pairs = get_interactions_from_df(df, model_chains)
+            data['interacting_pairs']=interacting_pairs
+            data['non_interacting_pairs']=non_interacting_pairs
+        if save_file:
+            with open(saving_dir + '/' + id_name + '.dill', 'wb') as f:
+                dill.dump(data, f)
+
+    elif outtype == 'tfrecord':
+        print(f'### TFRecord {id_name}')
+        features, labels_arr, IDs, columns = extract_data_for_tfrecord(df, id_name)
+        data = [features, labels_arr, IDs, columns]
+        if save_file:
+            print('No save to tfrecord implemented yet, giving the output as a list')
+
+    print(f'#### data saved {id_name}', saving_dir + '/' + id_name + '.dill')
     pdb_file, df, hsaacs, interacting_pairs, non_interacting_pairs, UN, DN = None, None, None, None, None, None, None
     del pdb_file, df, hsaacs, interacting_pairs, non_interacting_pairs, UN, DN
     gc.collect()

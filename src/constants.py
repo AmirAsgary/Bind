@@ -74,7 +74,8 @@ one_hot_encoding_scalar = {'ALA': 0.,
     'THR': 16.,
     'TRP': 17.,
     'TYR': 18.,
-    'VAL': 19.}
+    'VAL': 19.,
+    'UNK': 20.}
 
     
 
