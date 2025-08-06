@@ -2,3 +2,4 @@ data/large
 data/mmseqs_cluster
 tmp/
 tmp*
+test*

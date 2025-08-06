@@ -4,6 +4,7 @@ import dill
 import os
 import re
 import time
+from scipy.spatial import cKDTree
 import random
 import string
 from Bio import PDB
@@ -236,7 +237,7 @@ def calc_surface_info(parsed_pdb_file, tmp_save_path, model_name):
             SASA[chain.get_id()] = result
             # calculate residue depth and protein surface
             surface = get_surface(structure[0])
-            SURFACE[chain.get_id()] = surface
+            SURFACE[chain.get_id()] = surface # this is just a numpy array of dim  (N, 3)
             os.remove(tmp)
     return SASA, SURFACE
 
@@ -900,7 +901,13 @@ def df_to_pdb(df, default_cols=True, cols=None, filename='tmp.pdb'):
 def pdb_to_df(pdb_file: str, structure, add_sasa=True, add_cx=True, pdb_id='A'):
     # Parse PDB
     os.makedirs('tmp', exist_ok=True)
-    if add_sasa: sasa, surface = calc_surface_info(structure, 'tmp', pdb_id)
+    if add_sasa: 
+        sasa, surface = calc_surface_info(structure, 'tmp', pdb_id)
+        surface_kdtrees = {
+                chain_id: cKDTree(surface[chain_id]) for chain_id in surface
+            }
+                
+
     atom_data = []  # keeps dictionaries, each a row of df
     model_chains = []
     for model in structure:
@@ -908,11 +915,11 @@ def pdb_to_df(pdb_file: str, structure, add_sasa=True, add_cx=True, pdb_id='A'):
         for chain in model:
             model_chains.append(chain.get_id())
             a = 0
+            
             for residue in chain:
+                sidechain_pseudopos = residue_geometric_centroid(residue)
+                backbone_pseudopos = residue_backbone_centroid(residue)
                 for atom in residue:
-                    sidechain_pseudopos = residue_geometric_centroid(residue)
-
-                    backbone_pseudopos = residue_backbone_centroid(residue)
                     atom_info = {
                                  'model': model.get_id(),
                                  'chain': chain.get_id(),
@@ -932,9 +939,10 @@ def pdb_to_df(pdb_file: str, structure, add_sasa=True, add_cx=True, pdb_id='A'):
                                  'backbone_pseudopos_y':backbone_pseudopos[1],
                                  'backbone_pseudopos_z':backbone_pseudopos[2],
                                  'bfactor': atom.bfactor}
+                    
                     if add_sasa:
                         atom_info.update({'sasa': sasa[chain.get_id()].atomArea(a - 1) / 75}) # approximate maximum value
-                        atom_info.update({'rd_value': min_dist(atom.coord, surface[chain.get_id()]) / 7.5}) # approximate maximum value
+                        atom_info.update({'rd_value': surface_kdtrees[chain.get_id()].query(atom.coord)[0] / 7.5}) # approximate maximum value
                     a = a + 1
                     atom_data.append(atom_info)
                 res_id = res_id + 1
@@ -949,10 +957,7 @@ def pdb_to_df(pdb_file: str, structure, add_sasa=True, add_cx=True, pdb_id='A'):
             DICTS.append(pd.DataFrame(cx_dict))
         DICTS = pd.concat(DICTS)
         for col in DICTS.columns: df[col] = DICTS[col].tolist()
-    if add_sasa: del sasa, surface
-    if add_cx: del cx_dict, xyz_arr
-    del structure
-    gc.collect()
+
     return df, model_chains
 
 def foldseek_sequence_distance_features(i, j):
@@ -968,7 +973,7 @@ def foldseek_sequence_distance_features(i, j):
     delta = i - j
     sign = np.sign(delta)
     abs_delta = np.abs(delta)
-    feature1 = sign * np.minimum(abs_delta, 4)
+    feature1 = sign * np.minimum(abs_delta, 6)
     feature2 = sign * np.log(abs_delta + 1)
     return feature1, feature2
 
@@ -1176,8 +1181,6 @@ def compute_geometrical_features(sidechain_centroid_array, backbone_centroid_arr
             f'log_foldseek_a_{k}': log_foldseek_a[inverse_indeces],
         })
 
-        del t12, t23, t45, t56, t78, t89, t75, t95, t42, t62, t108, t811, t110, t311, t28, t47, t69, t25, t85
-        gc.collect()
     
     # calculate cosine angles between k nearest neighbours. like this: CAi-->CAk_0 and CAi-->CAk_1 ... and also for CB
     vectors_i_to_all_ks_ca = np.concatenate(vectors_i_to_all_ks_ca, axis=1) # (N, k_nearest, 3)
@@ -1241,7 +1244,7 @@ def get_interactions_from_df(df, model_chains):
 
 
 class TFRecordManager:
-    def __init__(self, tfrecord_path: Union[str, List[str]], feature_dim: int, batch_size: int = 32, shuffle_buffer_size: int = 1000, ):
+    def __init__(self, tfrecord_path: Union[str, List[str]], feature_dim: int, batch_size: int = 32, shuffle_buffer_size: int = 1000, plddt: bool = True):
         """
         Initializes the TFRecordManager with the path to the TFRecord file and the feature dimension.
         Args:
@@ -1249,23 +1252,29 @@ class TFRecordManager:
             feature_dim (int): Dimension of the features to be written to the TFRecord.
             batch_size (int): Batch size for reading the TFRecord.
             shuffle_buffer_size (int): Buffer size for shuffling the dataset.
+            plddt (bool): Whether to include pLDDT features in the TFRecord. Default is True.
         """
         self.tfrecord_path = tfrecord_path
         self.feature_dim = feature_dim
         self.batch_size = batch_size
         self.shuffle_buffer_size = shuffle_buffer_size
+        self.plddt = plddt
 
     @staticmethod
-    def _serialize_example(feature: np.ndarray, label: np.ndarray, ID_arr: np.ndarray) -> bytes:
+    def _serialize_example(feature: np.ndarray, label: np.ndarray, ID_arr: np.ndarray, plddt: None | np.ndarray) -> bytes:
         """Serialize one sample to tf.train.Example."""
         data = {
             'ids': tf.train.Feature(bytes_list=tf.train.BytesList(value=[s.encode('utf-8') for s in ID_arr.flatten()])),
             'labels': tf.train.Feature(float_list=tf.train.FloatList(value=label.flatten().tolist())),
             'features': tf.train.Feature(float_list=tf.train.FloatList(value=feature.tolist())),
         }
+        if isinstance(plddt, np.ndarray):
+            assert plddt.shape == (1,), f"Expected pLDDT to be a scalar, got shape {plddt.shape}"
+            data['plddt'] = tf.train.Feature(float_list=tf.train.FloatList(value=plddt.flatten().tolist()))
+
         return tf.train.Example(features=tf.train.Features(feature=data)).SerializeToString()
 
-    def write_samples(self, features: np.ndarray, labels: np.ndarray, ID_arrs: np.ndarray) -> None: # all 2D arrays (N, d) and (N, 1) and (N, 1)
+    def write_samples(self, features: np.ndarray, labels: np.ndarray, ID_arrs: np.ndarray, plddt: None | np.ndarray) -> None: # all 2D arrays (N, d) and (N, 1) and (N, 1), (N,1)
         
         assert tf.shape(features)[0] == tf.shape(labels)[0] == tf.shape(ID_arrs)[0], \
             f"Shapes mismatch: features {features.shape}, labels {labels.shape}, IDs {ID_arrs.shape}"
@@ -1275,11 +1284,14 @@ class TFRecordManager:
         assert labels.shape[1] == 1, f'Labels should be 1D, got {labels.shape}'
         assert ID_arrs.shape[1] == 1, f'IDs should be 1D, got {ID_arrs.shape}'
         assert isinstance(self.tfrecord_path, str), f'When writing samples, tfrecord_path must be a string, got {type(self.tfrecord_path)}, list only is for reading'
+        if self.plddt:
+            assert plddt is not None, "pLDDT array must be provided when plddt=True"
+            assert plddt.shape[0] == features.shape[0], f"pLDDT shape {plddt.shape} does not match features shape {features.shape}"
+            assert plddt.shape[1] == 1, f"Expected pLDDT to be a 2D array with shape (N, 1), got {plddt.shape}"
         N = features.shape[0]
         with tf.io.TFRecordWriter(self.tfrecord_path) as writer:
             for i in range(N):
-                print(features[i].shape, labels[i].shape, ID_arrs[i].shape)
-                writer.write(self._serialize_example(features[i], labels[i], ID_arrs[i]))
+                writer.write(self._serialize_example(features[i], labels[i], ID_arrs[i], plddt[i]) if self.plddt else self._serialize_example(features[i], labels[i], ID_arrs[i]))
 
     def _parse_example(self, example_proto: tf.Tensor) -> tuple:
         """Parse a single Example into (features, labels, ids)."""
@@ -1288,11 +1300,17 @@ class TFRecordManager:
             'labels': tf.io.FixedLenFeature([1], tf.float32),
             'features': tf.io.FixedLenFeature([self.feature_dim], tf.float32),
         }
+        if self.plddt:
+            desc['plddt'] = tf.io.FixedLenFeature([1], tf.float32)
         parsed = tf.io.parse_single_example(example_proto, desc)
         ids = tf.sparse.to_dense(parsed['ids'])
         labels = parsed['labels']
         features = parsed['features']
-        return features, labels, ids
+        if self.plddt:
+            plddt = parsed['plddt']
+            return features, labels, ids, plddt
+        else:
+            return features, labels, ids
     
     @staticmethod
     @tf.autograph.experimental.do_not_convert
@@ -1347,6 +1365,7 @@ def extract_data_for_tfrecord(df: pd.DataFrame, pdb_id: str):
         arrsubset = dfsub[['sasa', 'cx', 'rd_value']].to_numpy() #(N, 3)
         physiochem_arr.append(arrsubset)
     physiochem_arr = np.concatenate(physiochem_arr, axis=-1) #(N, 12) float
+    cx_min_max_avg_std = dfsub[['cx_min', 'cx_max', 'cx_avg', 'cx_std']].to_numpy() #(N, 4)
     # labels (resname ohe scalar)
     labels_arr = np.array([[one_hot_encoding_scalar[key]] for key in dfsub.resname.tolist()]) #(N,1) float
     # plddt
@@ -1356,12 +1375,13 @@ def extract_data_for_tfrecord(df: pd.DataFrame, pdb_id: str):
     columns = ['sasa_N', 'cx_N', 'rd_value_N',
                'sasa_CA', 'cx_CA', 'rd_value_CA',
                'sasa_C', 'cx_C', 'rd_value_C',
-               'sasa_O', 'cx_O', 'rd_value_O', 'bfactor'] + list(dfsub.columns[25:])
+               'sasa_O', 'cx_O', 'rd_value_O', 
+               'cx_min', 'cx_max', 'cx_avg', 'cx_std'] + list(dfsub.columns[25:])
     # concatenate all
-    all_arr = np.concatenate([physiochem_arr,  plddt_arr, geo_arr], axis=-1) #(N, 12 + 1  + d)
+    all_arr = np.concatenate([physiochem_arr, cx_min_max_avg_std, geo_arr], axis=-1) #(N, 12 + 4 + d)
     # generate IDs
     IDs = np.array([f"{pdb_id}_{i}" for i in range(len(dfsub))])[:, np.newaxis]  #(N, 1)
-    return all_arr, labels_arr, IDs, columns
+    return all_arr, labels_arr, IDs, columns, plddt_arr #(N, d), (N, 1), (N, 1), columns(list), (N, 1)
         
 
 
@@ -1394,11 +1414,9 @@ def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../databas
         hsaacs , UN, DN = hsaacs[inverse_indeces], UN[inverse_indeces], DN[inverse_indeces]
         df['UN'], df['DN'] = UN, DN
         print(f'#### 5- hsaacs done {id_name}')
-
     df = add_gmf_to_df(df, model_chains, k_nearest=k_nearest) # adds geometrical features to df
+    print("#### 7- geometrical features added")
 
-
-    print(f'#### 6- interacting_pairs done {id_name}')
     if outtype == 'dill':
         data = {
             'id_name':id_name, 'pdb_file':pdb_file, 'df':df, #'hsaacs':hsaacs,
@@ -1414,8 +1432,8 @@ def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../databas
 
     elif outtype == 'tfrecord':
         print(f'### TFRecord {id_name}')
-        features, labels_arr, IDs, columns = extract_data_for_tfrecord(df, id_name)
-        data = [features, labels_arr, IDs, columns]
+        features, labels_arr, IDs, columns, plddt_arr = extract_data_for_tfrecord(df, id_name)
+        data = [features, labels_arr, IDs, columns, plddt_arr] #(N,d), (N,1), (N,1), columns(list), (N,1)
         if save_file:
             print('No save to tfrecord implemented yet, giving the output as a list')
 
@@ -1447,3 +1465,9 @@ def extract_feature_from_dill(inputs, output, cols=None):
 #df = pd.read_csv('../raw/e9/tmp.tsv', sep='\t', header=0)
 #Extract_and_Save_from_PDB('../raw/e9/2e9f.pdb1_0.dill', from_dill=True, saving_dir='../tmp_database/e9')
 #print(df)
+
+
+
+
+
+
