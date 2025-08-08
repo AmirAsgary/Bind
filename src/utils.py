@@ -24,9 +24,13 @@ import warnings
 import gc
 import psutil
 import tensorflow as tf
+
+import logging
+logger = logging.getLogger(__name__)  # This will be 'src.utils' if imported as from src import utils
+
 def log_memory_usage():
     process = psutil.Process(os.getpid())
-    print(f"Memory usage: {process.memory_info().rss / 1024 ** 2} MB")
+    logger.debug(f"Memory usage: {process.memory_info().rss / 1024 ** 2} MB")
 
 def remove_nonsense_atoms(residue):
     res_list = list(residue)
@@ -103,7 +107,7 @@ def renumber_pdb_residues(input_pdb, output_pdb_renumbered):
                         elif np.max(i) <= 3: 
                             list(residue)[np.max(i)].set_coord(list(residue)[np.max[i]].get_coord() + 0.02)
                             state_trim = 'moved by 0.02'
-                        print(triming_at, state_trim, np.max(i))
+                        logger.debug(triming_at, state_trim, np.max(i))
                     
                 
                 
@@ -159,7 +163,7 @@ def renumber_pdb_residues2(input_pdb, output_pdb_renumbered):
                         elif np.max(i) <= 3: 
                             list(residue)[np.max(i)].set_coord(list(residue)[np.max[i]].get_coord() + 0.02)
                             state_trim = 'moved by 0.02'
-                        print(triming_at, state_trim, np.max(i))
+                        logger.debug(triming_at, state_trim, np.max(i))
             
             ########################
                 new_residue = PDB.Residue.Residue((' ', residue_counter, residue.id[2]), 
@@ -850,7 +854,7 @@ def load_data_from_df(df, cols=None):
         array[:, -1] = array[labs, -2]
         # remove those with unknown residue that are filled with -1
         mask = (array[:, -1] != -1) & (array[:, -2] != -1)
-        #print(mask)
+        #logger.debug(mask)
         array = array[mask]
     return array
 
@@ -1213,7 +1217,6 @@ def add_gmf_to_df(df, model_chains, k_nearest=1):
         unq_df = get_unique_df(chain_df, subset='residue', keep='first')
         sidechain_centroid_array = unq_df[['sidechain_pseudopos_x', 'sidechain_pseudopos_y', 'sidechain_pseudopos_z']].to_numpy()
         backbone_centroid_array = unq_df[['backbone_pseudopos_x', 'backbone_pseudopos_y', 'backbone_pseudopos_z']].to_numpy()
-        print('################SIDE',sidechain_centroid_array.shape)
         dict = compute_geometrical_features(sidechain_centroid_array,
                                             backbone_centroid_array,
                                             res_labels,
@@ -1222,7 +1225,7 @@ def add_gmf_to_df(df, model_chains, k_nearest=1):
             out_df = pd.DataFrame(dict)
         except:
             for key, value in dict.items():
-                print(f"Key: {key}, Value: {len(value)}, Type: {type(value)}")
+                logger.debug(f"Key: {key}, Value: {len(value)}, Type: {type(value)}")
             raise ValueError("Error in creating DataFrame from computed geometrical features.")
         DICTS.append(out_df)
     DICTS = pd.concat(DICTS).reset_index(drop=True)
@@ -1386,63 +1389,87 @@ def extract_data_for_tfrecord(df: pd.DataFrame, pdb_id: str):
 
 
 def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../database', k_nearest=1, inteacting_residues=False,
-                              un_dn=False, outtype='dill', save_file=False):
-    assert outtype in ['dill', 'tfrecord'], f"save_type must be 'dill' or 'tfrecord', got {save_type}"
-    id_name = input_file.split('/')[-1].replace('.dill', '').replace('.pdb', '')
-    print(f'#### 1- Extract for id {id_name}')
-    os.makedirs(saving_dir, exist_ok=True)
+                              un_dn=False, outtype='dill', save_file=True, error_log='error.log', size_limit=10,
+                              check_if_exists=True):
+    try:
+        assert outtype in ['dill', 'tfrecord'], f"save_type must be 'dill' or 'tfrecord', got {outtype}"
+        id_name = input_file.split('/')[-1].replace('.dill', '').replace('.pdb', '')
+        if check_if_exists:
+            arrrpath = os.path.join(saving_dir, 'arrays', f'{id_name}.npz')
+            if os.path.exists(arrrpath) and outtype == 'tfrecord':
+                logger.debug(f"### File {arrrpath} already exists, skipping extraction.")
+                return arrrpath
+            elif os.path.exists(os.path.join(saving_dir + '/', id_name + '.dill')) and outtype == 'dill':
+                logger.debug(f"### File {os.path.join(saving_dir + '/', id_name + '.dill')} already exists, skipping extraction.")
+                return os.path.join(saving_dir + '/', id_name + '.dill')
+        logger.debug(f'#### 1- Extract for id {id_name}')
+        os.makedirs(saving_dir, exist_ok=True)
 
-    if from_dill:
-        print(f'Dill State {id_name}')
-        data = read_dill_and_get_dfs(input_file) # reads and cocats dfs from dill file
-        pdb_file = saving_dir + '/' + id_name + '.pdb'
-        df_to_pdb(data, default_cols=True, cols=None, filename=pdb_file) # saves pdb from dfs
-        print(f'#### 2- DF to PDB done {pdb_file}')
+        if from_dill:
+            logger.debug(f'Dill State {id_name}')
+            data = read_dill_and_get_dfs(input_file) # reads and cocats dfs from dill file
+            pdb_file = saving_dir + '/' + id_name + '.pdb'
+            df_to_pdb(data, default_cols=True, cols=None, filename=pdb_file) # saves pdb from dfs
+            logger.debug(f'#### 2- DF to PDB done {pdb_file}')
 
-    else:
-        print(f'PDB State {id_name}')
-        pdb_file = input_file
-    structure = clean_and_renumber_pdb(pdb_file, pdb_file) # cleans and saves the structure
-    print(f'#### 3- Structure cleaned and renumbered {id_name}')
+        else:
+            logger.debug(f'PDB State {id_name}')
+            pdb_file = input_file
+        structure = clean_and_renumber_pdb(pdb_file, pdb_file) # cleans and saves the structure
+        logger.debug(f'#### 3- Structure cleaned and renumbered {id_name}')
 
-    df, model_chains = pdb_to_df(pdb_file, structure, add_sasa=True, add_cx=True, pdb_id=id_name)
-    print(f'#### 4- pdb to df done {id_name}')
+        df, model_chains = pdb_to_df(pdb_file, structure, add_sasa=True, add_cx=True, pdb_id=id_name)
+        if size_limit:
+            # maximum number of res_id should be above size_limit
+            assert np.max(df['res_id'].tolist()) >= size_limit, f"Size limit {size_limit} not met for {id_name}"
+            
 
-    if un_dn:
-        unique_labels, inverse_indeces = np.unique(np.array(df.residue.tolist()), return_inverse=True)
-        hsaacs, UN, DN = get_hsaac_for_pdb_residues(structure, len(unique_labels))
-        hsaacs , UN, DN = hsaacs[inverse_indeces], UN[inverse_indeces], DN[inverse_indeces]
-        df['UN'], df['DN'] = UN, DN
-        print(f'#### 5- hsaacs done {id_name}')
-    df = add_gmf_to_df(df, model_chains, k_nearest=k_nearest) # adds geometrical features to df
-    print("#### 7- geometrical features added")
+        logger.debug(f'#### 4- pdb to df done {id_name}')
 
-    if outtype == 'dill':
-        data = {
-            'id_name':id_name, 'pdb_file':pdb_file, 'df':df, #'hsaacs':hsaacs,
-                }
-        if inteacting_residues:
-            print(f'### Interacting residues {id_name}')
-            interacting_pairs, non_interacting_pairs = get_interactions_from_df(df, model_chains)
-            data['interacting_pairs']=interacting_pairs
-            data['non_interacting_pairs']=non_interacting_pairs
+        if un_dn:
+            unique_labels, inverse_indeces = np.unique(np.array(df.residue.tolist()), return_inverse=True)
+            hsaacs, UN, DN = get_hsaac_for_pdb_residues(structure, len(unique_labels))
+            hsaacs , UN, DN = hsaacs[inverse_indeces], UN[inverse_indeces], DN[inverse_indeces]
+            df['UN'], df['DN'] = UN, DN
+            logger.debug(f'#### 5- hsaacs done {id_name}')
+        df = add_gmf_to_df(df, model_chains, k_nearest=k_nearest) # adds geometrical features to df
+        logger.debug("#### 7- geometrical features added")
+
+        if outtype == 'dill':
+            data = {
+                'id_name':id_name, 'pdb_file':pdb_file, 'df':df, #'hsaacs':hsaacs,
+                    }
+            if inteacting_residues:
+                logger.debug(f'### Interacting residues {id_name}')
+                interacting_pairs, non_interacting_pairs = get_interactions_from_df(df, model_chains)
+                data['interacting_pairs']=interacting_pairs
+                data['non_interacting_pairs']=non_interacting_pairs
+            if save_file:
+                with open(saving_dir + '/' + id_name + '.dill', 'wb') as f:
+                    dill.dump(data, f)
+
+        elif outtype == 'tfrecord':
+            logger.debug(f'### TFRecord {id_name}')
+            features, labels_arr, IDs, columns, plddt_arr = extract_data_for_tfrecord(df, id_name)
+            data = [features, labels_arr, IDs, columns, plddt_arr] #(N,d), (N,1), (N,1), columns(list), (N,1)
+            assert len(features) == len(labels_arr) == len(IDs) == len(plddt_arr), f'Mismatch in lengths: features {len(features)}, labels {len(labels_arr)}, IDs {len(IDs)}, plddt {len(plddt_arr)}'
+            if save_file:
+                
+                os.makedirs(os.path.join(saving_dir, 'arrays'), exist_ok=True)
+                np.savez(arrrpath, features=features, labels=labels_arr, IDs=IDs, plddt=plddt_arr)
+                logger.debug(f"### npz file saved in {arrrpath}")
+                
+                
+
         if save_file:
-            with open(saving_dir + '/' + id_name + '.dill', 'wb') as f:
-                dill.dump(data, f)
-
-    elif outtype == 'tfrecord':
-        print(f'### TFRecord {id_name}')
-        features, labels_arr, IDs, columns, plddt_arr = extract_data_for_tfrecord(df, id_name)
-        data = [features, labels_arr, IDs, columns, plddt_arr] #(N,d), (N,1), (N,1), columns(list), (N,1)
-        if save_file:
-            print('No save to tfrecord implemented yet, giving the output as a list')
-
-    print(f'#### data saved {id_name}', saving_dir + '/' + id_name + '.dill')
-    pdb_file, df, hsaacs, interacting_pairs, non_interacting_pairs, UN, DN = None, None, None, None, None, None, None
-    del pdb_file, df, hsaacs, interacting_pairs, non_interacting_pairs, UN, DN
-    gc.collect()
-    return data
-
+            return arrrpath if outtype == 'tfrecord' else os.path.join(saving_dir + '/', id_name + '.dill')
+        else:
+            return data
+    except Exception as e:
+        logger.error(f"#Error_{input_file}_{e}")
+        with open(error_log, 'a') as f:
+            f.write(f"{input_file}: {e}\n")
+        return None
 
 
 def extract_feature_from_dill(inputs, output, cols=None):
@@ -1454,7 +1481,7 @@ def extract_feature_from_dill(inputs, output, cols=None):
         ARR.append(array)
     ARR = np.concatenate(ARR)
     np.save(output, ARR)
-    print(input, '--->', output, '--- shape:', ARR.shape)
+    logger.debug(input, '--->', output, '--- shape:', ARR.shape)
     return ARR
 
 #profiler = cProfile.Profile()
@@ -1464,7 +1491,7 @@ def extract_feature_from_dill(inputs, output, cols=None):
 #df.to_csv('../tmp/df.tsv', sep='\t', index=0)
 #df = pd.read_csv('../raw/e9/tmp.tsv', sep='\t', header=0)
 #Extract_and_Save_from_PDB('../raw/e9/2e9f.pdb1_0.dill', from_dill=True, saving_dir='../tmp_database/e9')
-#print(df)
+#logger.debug(df)
 
 
 

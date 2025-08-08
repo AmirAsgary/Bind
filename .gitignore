@@ -3,3 +3,5 @@ data/mmseqs_cluster
 tmp/
 tmp*
 test.py
+error*
+*.log
