@@ -78,6 +78,8 @@ def main():
     parser.add_argument('--tfrecord_path', type=str, help='Path to save the TFRecord file.', required=True)
     parser.add_argument('--input_dir', type=str, default='/scratch-scc/users/u14286/piplines/Bind/data/large/alphafold_db/pdb')
     parser.add_argument('--tmp_dir', type=str, default='tmp', help='Temporary directory for intermediate files.')
+    parser.add_argument('--parallel', action='store_true', help='Use parallel processing for PDB files.')
+    
 
     args = parser.parse_args()
 
@@ -86,18 +88,27 @@ def main():
 
     s = time.time()
     ### === Using ProcessPoolExecutor for parallel processing === ###
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        npz_paths = [executor.submit(process_pdb, pdb) for pdb in pdbs]
-        
+    if args.parallel:
+        with concurrent.futures.ProcessPoolExecutor() as executor:
+            npz_paths = [executor.submit(process_pdb, pdb) for pdb in pdbs]
+            
+            results = []
+            for future in tqdm(concurrent.futures.as_completed(npz_paths), total=len(npz_paths), desc="Processing PDBs"):
+                try:
+                    result = future.result()
+                    if result is not None:
+                        results.append(result)
+                except:
+                    pass
+    else:    
         results = []
-        for future in tqdm(concurrent.futures.as_completed(npz_paths), total=len(npz_paths), desc="Processing PDBs"):
+        for pdb in tqdm(pdbs, total=len(pdbs), desc="Processing PDBs"):
             try:
-                result = future.result()
+                result = process_pdb(pdb)
                 if result is not None:
                     results.append(result)
             except:
                 pass
-
 
     FEATURES, LABELS, IDs, PLDDT = [], [], [], []
     for path in tqdm(results, desc="Creating Arrays"):

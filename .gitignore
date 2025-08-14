@@ -5,3 +5,5 @@ tmp*
 test.py
 error*
 *.log
+test*
+analysis/feature_stats.csv

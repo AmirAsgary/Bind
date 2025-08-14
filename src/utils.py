@@ -1336,6 +1336,7 @@ class TFRecordManager:
                                     cycle_length=num_parallel_reads,
                                     num_parallel_calls=tf.data.AUTOTUNE)
         ds = ds.shuffle(self.shuffle_buffer_size)
+        #ds = ds.repeat()
         ds = ds.map(self._parse_example, num_parallel_calls=tf.data.AUTOTUNE)
         ds = ds.batch(self.batch_size).prefetch(tf.data.AUTOTUNE)
         return ds
