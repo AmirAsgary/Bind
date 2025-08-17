@@ -1,7 +1,30 @@
 
-
-AMINO_ACIDS = 'ACDEFGHIKLMNPQRSTVWY-'
+aa_order = list("ARNDCEQGHILKMFPSTWYVX")
+AMINO_ACIDS = 'ARNDCEQGHILKMFPSTWYVX'
 AMINO_ACID_IDX = dict(zip(AMINO_ACIDS, range(len(AMINO_ACIDS))))
+
+one_hot_encoding_scalar = {'ALA': 0.,
+    'ARG': 1.,
+    'ASN': 2.,
+    'ASP': 3.,
+    'CYS': 4.,
+    'GLN': 5.,
+    'GLU': 6.,
+    'GLY': 7.,
+    'HIS': 8.,
+    'ILE': 9.,
+    'LEU': 10.,
+    'LYS': 11.,
+    'MET': 12.,
+    'PHE': 13.,
+    'PRO': 14.,
+    'SER': 15.,
+    'THR': 16.,
+    'TRP': 17.,
+    'TYR': 18.,
+    'VAL': 19.,
+    'UNK': 20.}
+
 three_to_one = {
     'ALA': 'A',
     'ARG': 'R',
@@ -23,7 +46,7 @@ three_to_one = {
     'TRP': 'W',
     'TYR': 'Y',
     'VAL': 'V',
-    'UNK': '-' }
+    'UNK': 'X' }
 
 standard_amino_acids = [
     'ALA', 'CYS', 'ASP', 'GLU', 'PHE', 'GLY', 'HIS', 'ILE', 'LYS',

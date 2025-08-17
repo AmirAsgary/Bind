@@ -1247,7 +1247,8 @@ def get_interactions_from_df(df, model_chains):
 
 
 class TFRecordManager:
-    def __init__(self, tfrecord_path: Union[str, List[str]], feature_dim: int, batch_size: int = 32, shuffle_buffer_size: int = 1000, plddt: bool = True):
+    def __init__(self, tfrecord_path: Union[str, List[str]], feature_dim: int, batch_size: int = 32, shuffle_buffer_size: int = 1000, plddt: bool = True,
+                 k_nearest: int = 5):
         """
         Initializes the TFRecordManager with the path to the TFRecord file and the feature dimension.
         Args:
@@ -1256,19 +1257,21 @@ class TFRecordManager:
             batch_size (int): Batch size for reading the TFRecord.
             shuffle_buffer_size (int): Buffer size for shuffling the dataset.
             plddt (bool): Whether to include pLDDT features in the TFRecord. Default is True.
+            k_nearest (int): number of nearest neighbours. used for assertion the shape of labels.
         """
         self.tfrecord_path = tfrecord_path
         self.feature_dim = feature_dim
         self.batch_size = batch_size
         self.shuffle_buffer_size = shuffle_buffer_size
         self.plddt = plddt
+        self.k_nearest = k_nearest
 
     @staticmethod
     def _serialize_example(feature: np.ndarray, label: np.ndarray, ID_arr: np.ndarray, plddt: None | np.ndarray) -> bytes:
         """Serialize one sample to tf.train.Example."""
         data = {
             'ids': tf.train.Feature(bytes_list=tf.train.BytesList(value=[s.encode('utf-8') for s in ID_arr.flatten()])),
-            'labels': tf.train.Feature(float_list=tf.train.FloatList(value=label.flatten().tolist())),
+            'labels': tf.train.Feature(float_list=tf.train.FloatList(value=label.tolist())),
             'features': tf.train.Feature(float_list=tf.train.FloatList(value=feature.tolist())),
         }
         if isinstance(plddt, np.ndarray):
@@ -1284,7 +1287,7 @@ class TFRecordManager:
         assert len(features.shape) == 2 and len(labels.shape) == 2 and len(ID_arrs.shape) == 2, \
             f"Expected 2D arrays, got features {features.shape}, labels {labels.shape}, IDs {ID_arrs.shape}"
         assert features.shape[1] == self.feature_dim, f'Feature dimension mismatch: expected {self.feature_dim}, got {features.shape[1]}'
-        assert labels.shape[1] == 1, f'Labels should be 1D, got {labels.shape}'
+        assert labels.shape[1] == int(2 * self.k_nearest + 1), f'Labels should be {2 * self.k_nearest + 1}D, got {labels.shape}'
         assert ID_arrs.shape[1] == 1, f'IDs should be 1D, got {ID_arrs.shape}'
         assert isinstance(self.tfrecord_path, str), f'When writing samples, tfrecord_path must be a string, got {type(self.tfrecord_path)}, list only is for reading'
         if self.plddt:
@@ -1300,7 +1303,7 @@ class TFRecordManager:
         """Parse a single Example into (features, labels, ids)."""
         desc = {
             'ids': tf.io.VarLenFeature(tf.string),
-            'labels': tf.io.FixedLenFeature([1], tf.float32),
+            'labels': tf.io.FixedLenFeature([int(2 * self.k_nearest + 1)], tf.float32),
             'features': tf.io.FixedLenFeature([self.feature_dim], tf.float32),
         }
         if self.plddt:
@@ -1349,14 +1352,40 @@ class TFRecordManager:
         return strategy.experimental_distribute_dataset(ds)
 
 
+def nearest_neighbour_label(df, k_nearest, one_hot_encoding_scalar, dist_thr=8.0):
+    ARR = []
+    for k in range(k_nearest):
+        df2 = df.copy()
+        nn_ind_cb = df2[f'nearest_neighbours_cb_{k}']
+        nn_ind_ca = df2[f'nearest_neighbours_ca_{k}']
+        nn_dist_original_cb = df2[f'nearest_distances_cb_{k}']
+        nn_dist_original_ca = df2[f'nearest_distances_ca_{k}']
+        # rearrange rows
+        df2_cb = df2.iloc[nn_ind_cb].copy()
+        df2_ca = df2.iloc[nn_ind_ca].copy()
+        # add distances
+        df2_cb.loc[:, 'orig_dist'] = nn_dist_original_cb.values
+        df2_ca.loc[:, 'orig_dist'] = nn_dist_original_ca.values
+        # mask far neighbors
+        df2_cb.loc[df2_cb['orig_dist'] > dist_thr, 'resname'] = 'UNK'
+        df2_ca.loc[df2_ca['orig_dist'] > dist_thr, 'resname'] = 'UNK'
+        # map to integers
+        df2_cb['resname_scalar'] = df2_cb['resname'].map(one_hot_encoding_scalar)
+        df2_ca['resname_scalar'] = df2_ca['resname'].map(one_hot_encoding_scalar)
+        arr = np.array([df2_ca.resname_scalar, df2_cb.resname_scalar]).T  # (N, 2)
+        ARR.append(arr)
+    ARR = np.concatenate(ARR, axis=-1)  # (N, 2*k)
+    return ARR
 
 
-def extract_data_for_tfrecord(df: pd.DataFrame, pdb_id: str):
+
+def extract_data_for_tfrecord(df: pd.DataFrame, pdb_id: str, k_nearest: int):
     '''
     Extracts data from the DataFrame for TFRecord format.
     Args:
         df (pd.DataFrame): DataFrame containing the data.
         pdb_id (str): PDB ID to be used for generating IDs.
+        k_nearest (int): number of nearest neighbours that lables should be extracted from.
     Returns:
         geo_arr (np.ndarray): Array containing the geometric and physiochemical features.
         labels_arr (np.ndarray): Array containing the labels (resname one-hot encoded).
@@ -1370,8 +1399,12 @@ def extract_data_for_tfrecord(df: pd.DataFrame, pdb_id: str):
         physiochem_arr.append(arrsubset)
     physiochem_arr = np.concatenate(physiochem_arr, axis=-1) #(N, 12) float
     cx_min_max_avg_std = dfsub[['cx_min', 'cx_max', 'cx_avg', 'cx_std']].to_numpy() #(N, 4)
-    # labels (resname ohe scalar)
+    # labels (resname ohe scalar and nearest neighbours)
     labels_arr = np.array([[one_hot_encoding_scalar[key]] for key in dfsub.resname.tolist()]) #(N,1) float
+    nn_labels_arr = nearest_neighbour_label(dfsub, k_nearest, one_hot_encoding_scalar) #(N,2*k_nearest)
+    nn_labels_arr = np.array(nn_labels_arr, dtype=np.float32)
+    LABELS_ARR = np.concatenate([labels_arr, nn_labels_arr], axis=-1) #(N, 1 + 2*k_nearest)
+
     # plddt
     plddt_arr = dfsub.bfactor.to_numpy()[:, np.newaxis] #(N,1)
     # geometric
@@ -1385,7 +1418,7 @@ def extract_data_for_tfrecord(df: pd.DataFrame, pdb_id: str):
     all_arr = np.concatenate([physiochem_arr, cx_min_max_avg_std, geo_arr], axis=-1) #(N, 12 + 4 + d)
     # generate IDs
     IDs = np.array([f"{pdb_id}_{i}" for i in range(len(dfsub))])[:, np.newaxis]  #(N, 1)
-    return all_arr, labels_arr, IDs, columns, plddt_arr #(N, d), (N, 1), (N, 1), columns(list), (N, 1)
+    return all_arr, LABELS_ARR, IDs, columns, plddt_arr #(N, d), (N, 1), (N, 1), columns(list), (N, 1)
         
 
 
@@ -1451,7 +1484,7 @@ def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../databas
 
         elif outtype == 'tfrecord':
             logger.debug(f'### TFRecord {id_name}')
-            features, labels_arr, IDs, columns, plddt_arr = extract_data_for_tfrecord(df, id_name)
+            features, labels_arr, IDs, columns, plddt_arr = extract_data_for_tfrecord(df, id_name, k_nearest)
             data = [features, labels_arr, IDs, columns, plddt_arr] #(N,d), (N,1), (N,1), columns(list), (N,1)
             assert len(features) == len(labels_arr) == len(IDs) == len(plddt_arr), f'Mismatch in lengths: features {len(features)}, labels {len(labels_arr)}, IDs {len(IDs)}, plddt {len(plddt_arr)}'
             if save_file:
