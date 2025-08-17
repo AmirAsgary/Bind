@@ -1265,7 +1265,7 @@ class TFRecordManager:
         self.shuffle_buffer_size = shuffle_buffer_size
         self.plddt = plddt
         self.k_nearest = k_nearest
-
+#
     @staticmethod
     def _serialize_example(feature: np.ndarray, label: np.ndarray, ID_arr: np.ndarray, plddt: None | np.ndarray) -> bytes:
         """Serialize one sample to tf.train.Example."""
