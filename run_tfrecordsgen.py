@@ -6,7 +6,8 @@ import argparse
 import os
 from npy_append_array import NpyAppendArray
 import logging
-from tqdm import tqdm  # <-- added
+from tqdm import tqdm 
+import pandas as pd
 
 # --- Logger for utils.py ---
 utils_logger = logging.getLogger('src.utils')
@@ -21,6 +22,23 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(message)s'
 )
+
+def tsv_to_list(file_path):
+    df = pd.read_csv(file_path, sep='\t')
+    dftrain = df[df['train1_valid2_test3'] == 1]
+    for i in range(min(df.group), max(df.group) + 1):
+        dftrain_grou = dftrain[dftrain['group']==i]
+        repids = '\n'.join(dftrain_grou.repId.tolist()) # each id in one row
+        with open(f'data/large/alphafold_db/train_test_val/train_group{i}.txt', 'w', encoding="utf-8") as f:
+            f.write(repids)
+    dfval = df[df['train1_valid2_test3'] == 2]
+    dftest = df[df['train1_valid2_test3'] == 3]
+    repids_val = '\n'.join(dfval.repId.tolist())
+    repids_test = '\n'.join(dftest.repId.tolist())
+    with open(f'data/large/alphafold_db/train_test_val/valid_all.txt', 'w', encoding="utf-8") as f:
+        f.write(repids_val)
+    with open(f'data/large/alphafold_db/train_test_val/test_all.txt', 'w', encoding="utf-8") as f:
+        f.write(repids_test)
 
 
 def read_txt_to_list(file_path, input_dir, add_prefix=True):
@@ -53,21 +71,21 @@ def read_txt_to_list(file_path, input_dir, add_prefix=True):
                 print(f"Warning: {pdb_name} not found in {input_dir}. Skipping.")
     return lines
 
-
-def process_pdb(pdb):
+    
+    
+def process_pdb(pdb, saving_dir):
     path = utils.Extract_and_Save_from_PDB(
         input_file=pdb,
         from_dill=False,
-        saving_dir='tmp/',
+        saving_dir=saving_dir,
         k_nearest=5,
         inteacting_residues=False,
         un_dn=False,
         outtype='tfrecord',
         save_file=True,
         check_if_exists=True
-    )
-    
-    
+        )
+
     return path
 
 
@@ -83,15 +101,15 @@ def main():
 
     args = parser.parse_args()
 
+
     pdbs = read_txt_to_list(args.pdb_ids_txt, args.input_dir, add_prefix=True)
     print(f"Found {len(pdbs)} PDB files to process.")
 
     s = time.time()
     ### === Using ProcessPoolExecutor for parallel processing === ###
     if args.parallel:
-        with concurrent.futures.ProcessPoolExecutor() as executor:
-            npz_paths = [executor.submit(process_pdb, pdb) for pdb in pdbs]
-            
+        with concurrent.futures.ProcessPoolExecutor(max_workers=10) as executor:
+            npz_paths = [executor.submit(process_pdb, pdb, args.tmp_dir) for pdb in pdbs]
             results = []
             for future in tqdm(concurrent.futures.as_completed(npz_paths), total=len(npz_paths), desc="Processing PDBs"):
                 try:
@@ -111,22 +129,30 @@ def main():
                 pass
 
     FEATURES, LABELS, IDs, PLDDT = [], [], [], []
+    feature_fn = os.path.join(args.tmp_dir, 'all_features.npy')
+    labels_fn = os.path.join(args.tmp_dir, 'all_labels.npy')
+    ids_fn = os.path.join(args.tmp_dir, 'all_ids.npy')
+    plddts_fn = os.path.join(args.tmp_dir, 'all_plddts.npy')
+    features_appender = NpyAppendArray(feature_fn, delete_if_exists=True)
+    labels_appender = NpyAppendArray(labels_fn, delete_if_exists=True)
+    ids_appender = NpyAppendArray(ids_fn, delete_if_exists=True)
+    plddt_appender = NpyAppendArray(plddts_fn, delete_if_exists=True)
     for path in tqdm(results, desc="Creating Arrays"):
         data = np.load(path)
-    # Access each array by its key
         features = data['features']
         labels_arr = data['labels']
         ids = data['IDs']
         plddt = data['plddt']
-        LABELS.append(labels_arr)
-        IDs.append(ids)
-        PLDDT.append(plddt)
-        FEATURES.append(features)
+        labels_appender.append(np.ascontiguousarray(labels_arr))
+        ids_appender.append(np.ascontiguousarray(ids))
+        plddt_appender.append(np.ascontiguousarray(plddt))
+        features_appender.append(np.ascontiguousarray(features))
 
-    FEATURES = np.concatenate(FEATURES, axis=0)
-    LABELS = np.concatenate(LABELS, axis=0)
-    IDs = np.concatenate(IDs, axis=0)
-    PLDDT = np.concatenate(PLDDT, axis=0)
+    #FEATURES = np.concatenate(FEATURES, axis=0)
+    FEATURES = np.load(feature_fn, mmap_mode='r')
+    LABELS = np.load(labels_fn, axis=0)
+    IDs = np.load(ids_fn, axis=0)
+    PLDDT = np.load(plddts_fn, axis=0)
 
     tfmanager = utils.TFRecordManager(tfrecord_path=args.tfrecord_path, feature_dim=301, plddt=True)
     tfmanager.write_samples(features=FEATURES, labels=LABELS, ID_arrs=IDs, plddt=PLDDT)
@@ -136,6 +162,7 @@ def main():
     for batch in train_ds:
         features, labels, ID_arrs, plddt = batch
         print(features.shape, labels.shape, ID_arrs.shape, plddt.shape if plddt is not None else "No plddt")
+        print(ID_arrs)
         break
 
 

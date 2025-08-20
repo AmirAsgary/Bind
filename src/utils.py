@@ -1321,9 +1321,9 @@ class TFRecordManager:
     @staticmethod
     @tf.autograph.experimental.do_not_convert
     def parse_file(f):
-        return tf.data.TFRecordDataset(f)
+        return tf.data.TFRecordDataset(f, buffer_size=16*1024*1024)
 
-    def read_dataset(self, num_parallel_reads: int = tf.data.AUTOTUNE) -> tf.data.Dataset:
+    def read_dataset(self, num_parallel_reads: int = tf.data.AUTOTUNE, shuffle : bool = True) -> tf.data.Dataset:
         """
         Build a tf.data.Dataset that:
             - Supports single or multiple TFRecord files
@@ -1334,7 +1334,7 @@ class TFRecordManager:
             A tf.data.Dataset yielding (features, labels, ids).
         """
         paths = [self.tfrecord_path] if isinstance(self.tfrecord_path, str) else self.tfrecord_path
-        files_ds = tf.data.Dataset.list_files(paths, shuffle=True)
+        files_ds = tf.data.Dataset.list_files(paths, shuffle=shuffle)
         ds = files_ds.interleave(self.parse_file,
                                     cycle_length=num_parallel_reads,
                                     num_parallel_calls=tf.data.AUTOTUNE)
@@ -1428,6 +1428,7 @@ def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../databas
     try:
         assert outtype in ['dill', 'tfrecord'], f"save_type must be 'dill' or 'tfrecord', got {outtype}"
         id_name = input_file.split('/')[-1].replace('.dill', '').replace('.pdb', '')
+        os.makedirs(saving_dir, exist_ok=True)
         if check_if_exists:
             arrrpath = os.path.join(saving_dir, 'arrays', f'{id_name}.npz')
             if os.path.exists(arrrpath) and outtype == 'tfrecord':
@@ -1437,7 +1438,6 @@ def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../databas
                 logger.debug(f"### File {os.path.join(saving_dir + '/', id_name + '.dill')} already exists, skipping extraction.")
                 return os.path.join(saving_dir + '/', id_name + '.dill')
         logger.debug(f'#### 1- Extract for id {id_name}')
-        os.makedirs(saving_dir, exist_ok=True)
 
         if from_dill:
             logger.debug(f'Dill State {id_name}')

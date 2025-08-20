@@ -7,3 +7,4 @@ error*
 *.log
 test*
 analysis/feature_stats.csv
+arrays_and_tmp
