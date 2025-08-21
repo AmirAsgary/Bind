@@ -1506,6 +1506,35 @@ def Extract_and_Save_from_PDB(input_file, from_dill=True, saving_dir='../databas
         return None
 
 
+
+import signal
+
+class TimeoutException(Exception):
+    pass
+
+def timeout_handler(signum, frame):
+    raise TimeoutException()
+
+def Extract_and_Save_from_PDB_with_timeout(input_file, **kwargs):
+    timeout_sec = 5
+    # Set the alarm signal
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(timeout_sec)  # timeout in seconds
+
+    try:
+        # Call the original function
+        result = Extract_and_Save_from_PDB(input_file, **kwargs)
+        signal.alarm(0)  # disable the alarm if finished successfully
+        return result
+    except TimeoutException:
+        print(f"Timeout reached for {input_file}, returning None")
+        return None
+    except Exception as e:
+        # keep your existing error handling
+        print(f"Error for {input_file}: {e}")
+        return None
+
+
 def extract_feature_from_dill(inputs, output, cols=None):
 
     ARR = []

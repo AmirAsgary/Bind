@@ -74,7 +74,7 @@ def read_txt_to_list(file_path, input_dir, add_prefix=True):
     
     
 def process_pdb(pdb, saving_dir):
-    path = utils.Extract_and_Save_from_PDB(
+    path = utils.Extract_and_Save_from_PDB_with_timeout(
         input_file=pdb,
         from_dill=False,
         saving_dir=saving_dir,
@@ -97,6 +97,7 @@ def main():
     parser.add_argument('--input_dir', type=str, default='/scratch-scc/users/u14286/piplines/Bind/data/large/alphafold_db/pdb')
     parser.add_argument('--tmp_dir', type=str, default='tmp', help='Temporary directory for intermediate files.')
     parser.add_argument('--parallel', action='store_true', help='Use parallel processing for PDB files.')
+    parser.add_argument('--if_allnpy_exists_delete', action='store_true', help='If enabled, rewrites concatenated .npy files. If not, uses them to create tfrecords.')
     
 
     args = parser.parse_args()
@@ -122,37 +123,47 @@ def main():
         results = []
         for pdb in tqdm(pdbs, total=len(pdbs), desc="Processing PDBs"):
             try:
-                result = process_pdb(pdb)
+                print(pdb, args.tmp_dir)
+                result = process_pdb(pdb, args.tmp_dir)
                 if result is not None:
                     results.append(result)
-            except:
-                pass
+            except Exception as e:
+                print(f"Error processing {pdb}: {e}")
 
     FEATURES, LABELS, IDs, PLDDT = [], [], [], []
     feature_fn = os.path.join(args.tmp_dir, 'all_features.npy')
     labels_fn = os.path.join(args.tmp_dir, 'all_labels.npy')
     ids_fn = os.path.join(args.tmp_dir, 'all_ids.npy')
     plddts_fn = os.path.join(args.tmp_dir, 'all_plddts.npy')
-    features_appender = NpyAppendArray(feature_fn, delete_if_exists=True)
-    labels_appender = NpyAppendArray(labels_fn, delete_if_exists=True)
-    ids_appender = NpyAppendArray(ids_fn, delete_if_exists=True)
-    plddt_appender = NpyAppendArray(plddts_fn, delete_if_exists=True)
-    for path in tqdm(results, desc="Creating Arrays"):
-        data = np.load(path)
-        features = data['features']
-        labels_arr = data['labels']
-        ids = data['IDs']
-        plddt = data['plddt']
-        labels_appender.append(np.ascontiguousarray(labels_arr))
-        ids_appender.append(np.ascontiguousarray(ids))
-        plddt_appender.append(np.ascontiguousarray(plddt))
-        features_appender.append(np.ascontiguousarray(features))
-
+    check_if_exist = (
+        os.path.exists(feature_fn) and
+        os.path.exists(labels_fn) and
+        os.path.exists(ids_fn) and
+        os.path.exists(plddts_fn)
+        )
+    if args.if_allnpy_exists_delete:
+        check_if_exist = False
+    if check_if_exist==False:
+        features_appender = NpyAppendArray(feature_fn, delete_if_exists=True)
+        labels_appender = NpyAppendArray(labels_fn, delete_if_exists=True)
+        ids_appender = NpyAppendArray(ids_fn, delete_if_exists=True)
+        plddt_appender = NpyAppendArray(plddts_fn, delete_if_exists=True)
+        for path in tqdm(results, desc="Creating Arrays"):
+            data = np.load(path)
+            features = data['features']
+            labels_arr = data['labels']
+            ids = data['IDs']
+            plddt = data['plddt']
+            labels_appender.append(np.ascontiguousarray(labels_arr))
+            ids_appender.append(np.ascontiguousarray(ids))
+            plddt_appender.append(np.ascontiguousarray(plddt))
+            features_appender.append(np.ascontiguousarray(features))
+    print('loading tmp_dir/*.npy files')
     #FEATURES = np.concatenate(FEATURES, axis=0)
     FEATURES = np.load(feature_fn, mmap_mode='r')
-    LABELS = np.load(labels_fn, axis=0)
-    IDs = np.load(ids_fn, axis=0)
-    PLDDT = np.load(plddts_fn, axis=0)
+    LABELS = np.load(labels_fn,mmap_mode='r')
+    IDs = np.load(ids_fn, mmap_mode='r')
+    PLDDT = np.load(plddts_fn, mmap_mode='r')
 
     tfmanager = utils.TFRecordManager(tfrecord_path=args.tfrecord_path, feature_dim=301, plddt=True)
     tfmanager.write_samples(features=FEATURES, labels=LABELS, ID_arrs=IDs, plddt=PLDDT)
