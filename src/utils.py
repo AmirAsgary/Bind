@@ -1516,7 +1516,7 @@ def timeout_handler(signum, frame):
     raise TimeoutException()
 
 def Extract_and_Save_from_PDB_with_timeout(input_file, **kwargs):
-    timeout_sec = 5
+    timeout_sec = 120
     # Set the alarm signal
     signal.signal(signal.SIGALRM, timeout_handler)
     signal.alarm(timeout_sec)  # timeout in seconds
