@@ -8,6 +8,8 @@ from npy_append_array import NpyAppendArray
 import logging
 from tqdm import tqdm 
 import pandas as pd
+from tqdm import tqdm  # <-- added
+import pandas as pd
 
 # --- Logger for utils.py ---
 utils_logger = logging.getLogger('src.utils')
@@ -40,6 +42,22 @@ def tsv_to_list(file_path):
     with open(f'data/large/alphafold_db/train_test_val/test_all.txt', 'w', encoding="utf-8") as f:
         f.write(repids_test)
 
+def tsv_to_list(file_path):
+    df = pd.read_csv(file_path, sep='\t')
+    dftrain = df[df['train1_valid2_test3'] == 1]
+    for i in range(min(df.group), max(df.group) + 1):
+        dftrain_grou = dftrain[dftrain['group']==i]
+        repids = '\n'.join(dftrain_grou.repId.tolist()) # each id in one row
+        with open(f'data/large/alphafold_db/train_test_val/train_group{i}.txt', 'w', encoding="utf-8") as f:
+            f.write(repids)
+    dfval = df[df['train1_valid2_test3'] == 2]
+    dftest = df[df['train1_valid2_test3'] == 3]
+    repids_val = '\n'.join(dfval.repId.tolist())
+    repids_test = '\n'.join(dftest.repId.tolist())
+    with open(f'data/large/alphafold_db/train_test_val/valid_all.txt', 'w', encoding="utf-8") as f:
+        f.write(repids_val)
+    with open(f'data/large/alphafold_db/train_test_val/test_all.txt', 'w', encoding="utf-8") as f:
+        f.write(repids_test)
 
 def read_txt_to_list(file_path, input_dir, add_prefix=True):
     lines = []
