@@ -15,16 +15,16 @@ not_angle_columns = tf.constant(list(not_angle_columns_291.values()), dtype=tf.i
 keep_indices = keep_indices_291
 keep_indices_tf = tf.constant(keep_indices, dtype=tf.int32)
 # Create models
-'''
+
 encoder, decoder, plddt_model, seq_model = create_model_ae_plddt(input_shape=(291,), mask_ratio=0.10, num_layers=1, 
                                                 layer_dims=[128], latent_dim=128, 
                                                 batchnorm=False, activation='relu')
 
-model = keras.Model(
-    inputs=encoder.input,
-    outputs=[decoder(encoder.output[-1]), plddt_model(encoder.output[-1]), seq_model(encoder.output[-1])],
-    name='vae_plddt_seq_model'
-)
+#model = keras.Model(
+#    inputs=encoder.input,
+#    outputs=[decoder(encoder.output[-1]), plddt_model(encoder.output[-1]), seq_model(encoder.output[-1])],
+#    name='vae_plddt_seq_model'
+#)
 
 model = keras.Model(
     inputs=encoder.input,
@@ -32,7 +32,7 @@ model = keras.Model(
     name='ae_plddt_seq_model'
 )
 
-'''
+
 # Dataset
 tfmanager = TFRecordManager(tfrecord_path=tfrecord_path, feature_dim=301, plddt=True, batch_size=2056)
 train_ds = tfmanager.read_dataset()
